@@ -1,0 +1,63 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Trump Swap Online</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Trump Swap Online</h1>
+      <section class="panel">
+        <input id="nameInput" placeholder="Enter name" maxlength="20" />
+        <button id="joinBtn">Join Table</button>
+        <button id="leaveBtn">Leave</button>
+        <button id="addBotBtn">Add Bot</button>
+        <button id="resetBtn">Reset Table</button>
+      </section>
+
+      <section class="panel controls">
+        <button id="startBtn">Start Hand</button>
+        <input id="amountInput" type="number" min="1" placeholder="Amount" />
+        <div class="bet-actions">
+          <button data-action="check">Check</button>
+          <button data-action="call">Call</button>
+          <button data-action="bet">Bet</button>
+          <button data-action="raise">Raise</button>
+          <button data-action="fold">Fold</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Status</h2>
+        <div id="status"></div>
+        <div id="error" class="error"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Community Cards</h2>
+        <div id="community" class="card-row"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Your Hand</h2>
+        <p class="hint">Trick phase: click a card to play. Betting phase: pick one hand card + one community card, then Swap.</p>
+        <div id="hand" class="card-row"></div>
+        <button id="swapBtn">Swap Selected Cards (50% pot)</button>
+      </section>
+
+      <section class="panel">
+        <h2>Players</h2>
+        <ul id="players"></ul>
+      </section>
+
+      <section class="panel">
+        <h2>Game Log</h2>
+        <ul id="log"></ul>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>
