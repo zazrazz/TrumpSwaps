@@ -1,16 +1,43 @@
-const http = require('http');
-const fs = require('fs');
 const path = require('path');
-const { URL } = require('url');
+const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
 
+const PORT = process.env.PORT || 3000;
 const SUITS = ['S', 'H', 'D', 'C'];
 const RANKS = ['2', '3', '4', '5', '6', '7', '8', '9', 'T', 'J', 'Q', 'K', 'A'];
 const RANK_VALUE = Object.fromEntries(RANKS.map((r, i) => [r, i + 2]));
+const BOT_NAMES = ['Atlas', 'Vega', 'Nova', 'Rook', 'Blaze'];
 
-const BETTING_PHASES = ['preflopBet', 'flopBet', 'turnBet', 'riverBet'];
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server);
+
+app.use(express.static(path.join(__dirname, 'public')));
+
+function createPlayer({ id, name, isBot }) {
+  return {
+    id,
+    name,
+    isBot,
+    socketId: null,
+    connected: isBot,
+    stack: 1000,
+    hand: [],
+    folded: false,
+    inHand: false,
+    hasSwapped: false,
+    roundBet: 0,
+    tricksWon: 0,
+    acted: false,
+  };
+}
 
 const game = {
-  players: [],
+  players: [
+    createPlayer({ id: 'human', name: 'You', isBot: false }),
+    ...BOT_NAMES.map((name, i) => createPlayer({ id: `bot-${i + 1}`, name, isBot: true })),
+  ],
   phase: 'waiting',
   dealerIndex: 0,
   turnIndex: 0,
@@ -18,572 +45,729 @@ const game = {
   community: [],
   pot: 0,
   currentBet: 0,
-  actedSinceRaise: new Set(),
-  trick: { index: 0, leadSuit: null, cards: [], leaderIndex: 0 },
-  maxPlayers: 6,
+  trumpSuit: null,
+  trick: {
+    leadSuit: null,
+    plays: [],
+    leaderId: null,
+  },
   log: [],
-  nextBotId: 1,
+  handNumber: 0,
+  botTimer: null,
 };
 
-function log(msg) {
-  game.log.push(msg);
-  if (game.log.length > 40) game.log.shift();
+function addLog(line) {
+  game.log.push(line);
+  if (game.log.length > 16) game.log.shift();
+}
+
+function cardSuit(card) {
+  return card.slice(-1);
+}
+
+function cardRank(card) {
+  return card.slice(0, -1);
+}
+
+function cardScore(card) {
+  return RANK_VALUE[cardRank(card)] || 0;
 }
 
 function createDeck() {
   const deck = [];
-  for (const s of SUITS) for (const r of RANKS) deck.push(`${r}${s}`);
-  for (let i = deck.length - 1; i > 0; i--) {
+  for (const suit of SUITS) {
+    for (const rank of RANKS) {
+      deck.push(`${rank}${suit}`);
+    }
+  }
+  for (let i = deck.length - 1; i > 0; i -= 1) {
     const j = Math.floor(Math.random() * (i + 1));
     [deck[i], deck[j]] = [deck[j], deck[i]];
   }
   return deck;
 }
 
-const cardSuit = (c) => c[1];
-const cardRank = (c) => c[0];
-const isBot = (p) => p.type === 'bot';
-const activePlayers = () => game.players.filter((p) => p.inHand && !p.folded);
-
-function resetTable() {
-  game.phase = 'waiting';
-  game.turnIndex = 0;
-  game.deck = [];
-  game.community = [];
-  game.pot = 0;
-  game.currentBet = 0;
-  game.actedSinceRaise = new Set();
-  game.trick = { index: 0, leadSuit: null, cards: [], leaderIndex: 0 };
-  game.players.forEach((p) => {
-    p.hand = [];
-    p.inHand = false;
-    p.folded = false;
-    p.hasSwapped = false;
-    p.currentBet = 0;
-    p.tricksWon = 0;
-  });
-  log('Table reset.');
+function inHandPlayers() {
+  return game.players.filter((p) => p.inHand && !p.folded);
 }
 
-function getTrumpSuit() {
-  if (!game.community.length) return null;
-  const counts = { S: 0, H: 0, D: 0, C: 0 };
-  for (const c of game.community) counts[cardSuit(c)] += 1;
-  const maxCount = Math.max(...Object.values(counts));
-  const tiedSuits = SUITS.filter((s) => counts[s] === maxCount);
-  if (tiedSuits.length === 1) return tiedSuits[0];
-
-  let bestSuit = tiedSuits[0];
-  let bestRank = -1;
-  for (const s of tiedSuits) {
-    const maxRank = Math.max(...game.community.filter((c) => cardSuit(c) === s).map((c) => RANK_VALUE[cardRank(c)]));
-    if (maxRank > bestRank) {
-      bestSuit = s;
-      bestRank = maxRank;
+function nextActiveIndex(fromIndex) {
+  for (let i = 1; i <= game.players.length; i += 1) {
+    const idx = (fromIndex + i) % game.players.length;
+    const p = game.players[idx];
+    if (p.inHand && !p.folded) {
+      if (game.phase !== 'trick' || p.hand.length > 0) return idx;
     }
   }
-  return bestSuit;
+  return fromIndex;
 }
 
-function nextActiveIndex(from) {
-  for (let i = 0; i < game.players.length; i++) {
-    const idx = (from + i) % game.players.length;
-    const p = game.players[idx];
-    if (p.inHand && !p.folded) return idx;
+function recalculateTrump() {
+  if (!game.community.length) {
+    game.trumpSuit = null;
+    return;
   }
-  return from;
-}
 
-function advanceTurn() {
-  game.turnIndex = nextActiveIndex((game.turnIndex + 1) % game.players.length);
+  const counts = { S: 0, H: 0, D: 0, C: 0 };
+  for (const card of game.community) counts[cardSuit(card)] += 1;
+  const maxCount = Math.max(...Object.values(counts));
+  const tied = SUITS.filter((s) => counts[s] === maxCount);
+
+  if (tied.length === 1) {
+    game.trumpSuit = tied[0];
+    return;
+  }
+
+  let bestSuit = tied[0];
+  let bestRank = -1;
+  for (const suit of tied) {
+    const rankInSuit = Math.max(
+      ...game.community
+        .filter((c) => cardSuit(c) === suit)
+        .map((c) => cardScore(c))
+    );
+    if (rankInSuit > bestRank) {
+      bestRank = rankInSuit;
+      bestSuit = suit;
+    }
+  }
+
+  game.trumpSuit = bestSuit;
 }
 
 function resetRoundBets() {
   game.currentBet = 0;
-  game.actedSinceRaise = new Set();
-  game.players.forEach((p) => {
-    p.currentBet = 0;
-  });
-}
-
-function reveal(stage) {
-  game.deck.pop();
-  const n = stage === 'flop' ? 3 : 2;
-  for (let i = 0; i < n; i++) game.community.push(game.deck.pop());
-}
-
-function bettingRoundComplete() {
-  const actives = activePlayers();
-  if (actives.length <= 1) return true;
-  return actives.every((p) => p.currentBet === game.currentBet && game.actedSinceRaise.has(p.id));
-}
-
-function settleByFold(winner) {
-  if (winner) {
-    winner.chips += game.pot;
-    log(`${winner.name} wins ${game.pot} chips (all others folded).`);
+  for (const p of game.players) {
+    p.roundBet = 0;
+    p.acted = false;
   }
+}
+
+function revealCommunityCards(count) {
+  for (let i = 0; i < count; i += 1) {
+    const card = game.deck.pop();
+    if (card) game.community.push(card);
+  }
+  recalculateTrump();
+}
+
+function settleSingleWinner(winner) {
+  winner.stack += game.pot;
+  addLog(`${winner.name} wins ${game.pot} chips by fold.`);
+  game.pot = 0;
   game.phase = 'waiting';
 }
 
 function settleByTricks() {
-  const actives = activePlayers();
-  const top = Math.max(...actives.map((p) => p.tricksWon));
-  const winners = actives.filter((p) => p.tricksWon === top);
-  const share = Math.floor(game.pot / winners.length);
+  const contenders = inHandPlayers();
+  const maxTricks = Math.max(...contenders.map((p) => p.tricksWon));
+  const winners = contenders.filter((p) => p.tricksWon === maxTricks);
+  const split = Math.floor(game.pot / winners.length);
   let rem = game.pot % winners.length;
 
   for (const winner of winners) {
-    winner.chips += share + (rem > 0 ? 1 : 0);
+    winner.stack += split + (rem > 0 ? 1 : 0);
     if (rem > 0) rem -= 1;
   }
-  log(`Hand over. Winner(s): ${winners.map((w) => w.name).join(', ')}.`);
+
+  addLog(
+    `Hand over. Winner${winners.length > 1 ? 's' : ''}: ${winners
+      .map((w) => w.name)
+      .join(', ')} (${maxTricks} tricks).`
+  );
+
+  game.pot = 0;
   game.phase = 'waiting';
 }
 
-function proceedAfterBetting() {
-  const actives = activePlayers();
-  if (actives.length <= 1) return settleByFold(actives[0]);
+function isBetRoundComplete() {
+  const active = inHandPlayers();
+  if (active.length <= 1) return true;
+  return active.every((p) => p.acted && p.roundBet === game.currentBet);
+}
+
+function startTrickPhase() {
+  game.phase = 'trick';
+  const leader = nextActiveIndex(game.dealerIndex);
+  game.turnIndex = leader;
+  game.trick = {
+    leadSuit: null,
+    plays: [],
+    leaderId: game.players[leader].id,
+  };
+  addLog(`Trick-taking begins. Trump is ${game.trumpSuit || '-'} .`);
+}
+
+function proceedStage() {
+  const active = inHandPlayers();
+  if (active.length <= 1) {
+    settleSingleWinner(active[0]);
+    return;
+  }
 
   if (game.phase === 'preflopBet') {
-    reveal('flop');
+    revealCommunityCards(3);
     game.phase = 'flopBet';
     resetRoundBets();
-    game.turnIndex = nextActiveIndex((game.dealerIndex + 1) % game.players.length);
-    log('Flop revealed.');
-  } else if (game.phase === 'flopBet') {
-    reveal('turn');
+    game.turnIndex = nextActiveIndex(game.dealerIndex);
+    addLog('Flop revealed (3 cards).');
+    return;
+  }
+
+  if (game.phase === 'flopBet') {
+    revealCommunityCards(2);
     game.phase = 'turnBet';
     resetRoundBets();
-    game.turnIndex = nextActiveIndex((game.dealerIndex + 1) % game.players.length);
-    log('Turn revealed.');
-  } else if (game.phase === 'turnBet') {
-    reveal('river');
+    game.turnIndex = nextActiveIndex(game.dealerIndex);
+    addLog('Turn revealed (2 cards).');
+    return;
+  }
+
+  if (game.phase === 'turnBet') {
+    revealCommunityCards(2);
     game.phase = 'riverBet';
     resetRoundBets();
-    game.turnIndex = nextActiveIndex((game.dealerIndex + 1) % game.players.length);
-    log('River revealed.');
-  } else if (game.phase === 'riverBet') {
-    game.phase = 'trick';
-    game.trick = {
-      index: 1,
-      leadSuit: null,
-      cards: [],
-      leaderIndex: nextActiveIndex((game.dealerIndex + 1) % game.players.length),
-    };
-    game.turnIndex = game.trick.leaderIndex;
-    log(`Trick-taking begins. Trump: ${getTrumpSuit()}.`);
+    game.turnIndex = nextActiveIndex(game.dealerIndex);
+    addLog('River revealed (2 cards).');
+    return;
+  }
+
+  if (game.phase === 'riverBet') {
+    startTrickPhase();
   }
 }
 
-function evaluateTrickWinner(entries, leadSuit, trump) {
-  let best = entries[0];
-  for (const entry of entries.slice(1)) {
-    const a = best.card;
-    const b = entry.card;
+function evaluateTrickWinner(plays, leadSuit, trumpSuit) {
+  let winning = plays[0];
+
+  for (const challenger of plays.slice(1)) {
+    const a = winning.card;
+    const b = challenger.card;
     const aSuit = cardSuit(a);
     const bSuit = cardSuit(b);
-    const aTrump = trump && aSuit === trump;
-    const bTrump = trump && bSuit === trump;
+
+    const aTrump = trumpSuit && aSuit === trumpSuit;
+    const bTrump = trumpSuit && bSuit === trumpSuit;
 
     if (bTrump && !aTrump) {
-      best = entry;
+      winning = challenger;
       continue;
     }
     if (aTrump && !bTrump) continue;
-    if (aTrump && bTrump && RANK_VALUE[cardRank(b)] > RANK_VALUE[cardRank(a)]) {
-      best = entry;
+
+    if (aTrump && bTrump) {
+      if (cardScore(b) > cardScore(a)) winning = challenger;
       continue;
     }
 
-    if (!aTrump && !bTrump) {
-      if (bSuit === leadSuit && aSuit !== leadSuit) {
-        best = entry;
-        continue;
-      }
-      if (bSuit === leadSuit && aSuit === leadSuit && RANK_VALUE[cardRank(b)] > RANK_VALUE[cardRank(a)]) {
-        best = entry;
-      }
+    const aLead = aSuit === leadSuit;
+    const bLead = bSuit === leadSuit;
+
+    if (bLead && !aLead) {
+      winning = challenger;
+      continue;
+    }
+
+    if (aLead && bLead && cardScore(b) > cardScore(a)) {
+      winning = challenger;
     }
   }
-  return best.playerId;
+
+  return winning.playerId;
 }
 
-function startHand() {
-  const seated = game.players.filter((p) => p.connected);
-  if (seated.length < 2) return false;
+function isHumanTurn(socketId) {
+  const current = game.players[game.turnIndex];
+  return current && !current.isBot && current.socketId === socketId;
+}
 
-  game.deck = createDeck();
+function getPlayerBySocket(socketId) {
+  return game.players.find((p) => p.socketId === socketId);
+}
+
+function resetForNewHand() {
+  for (const p of game.players) {
+    p.hand = [];
+    p.folded = false;
+    p.inHand = false;
+    p.hasSwapped = false;
+    p.roundBet = 0;
+    p.tricksWon = 0;
+    p.acted = false;
+  }
   game.community = [];
   game.pot = 0;
   game.currentBet = 0;
-  game.actedSinceRaise = new Set();
-  game.trick = { index: 0, leadSuit: null, cards: [], leaderIndex: 0 };
+  game.trumpSuit = null;
+  game.trick = { leadSuit: null, plays: [], leaderId: null };
+}
 
-  game.players.forEach((p) => {
-    p.hand = [];
-    p.inHand = p.connected;
-    p.folded = false;
-    p.hasSwapped = false;
-    p.currentBet = 0;
-    p.tricksWon = 0;
-  });
+function startHand() {
+  const human = game.players[0];
+  if (!human.connected) {
+    addLog('Waiting for a human player to connect.');
+    return;
+  }
 
-  for (let i = 0; i < 7; i++) {
+  resetForNewHand();
+  game.handNumber += 1;
+  game.phase = 'preflopBet';
+  game.dealerIndex = (game.dealerIndex + 1) % game.players.length;
+  game.deck = createDeck();
+
+  for (const p of game.players) {
+    p.inHand = p.stack > 0;
+  }
+
+  for (let round = 0; round < 7; round += 1) {
     for (const p of game.players) {
       if (p.inHand) p.hand.push(game.deck.pop());
     }
   }
 
-  game.phase = 'preflopBet';
-  game.dealerIndex = (game.dealerIndex + 1) % game.players.length;
-  game.turnIndex = nextActiveIndex((game.dealerIndex + 1) % game.players.length);
-  log('New hand started. Pre-flop betting begins.');
-  return true;
+  game.turnIndex = nextActiveIndex(game.dealerIndex);
+  addLog(`Hand #${game.handNumber} started. Dealer: ${game.players[game.dealerIndex].name}`);
 }
 
-function asState(playerId) {
-  return {
-    phase: game.phase,
-    dealerIndex: game.dealerIndex,
-    turnPlayerId: game.players[game.turnIndex]?.id,
-    community: game.community,
-    trump: getTrumpSuit(),
-    pot: game.pot,
-    currentBet: game.currentBet,
-    trick: game.trick,
-    players: game.players.map((p) => ({
-      id: p.id,
-      name: p.name,
-      chips: p.chips,
-      inHand: p.inHand,
-      folded: p.folded,
-      handCount: p.hand.length,
-      hasSwapped: p.hasSwapped,
-      tricksWon: p.tricksWon,
-      currentBet: p.currentBet,
-      connected: p.connected,
-      type: p.type,
-      hand: p.id === playerId ? p.hand : undefined,
-    })),
-    log: game.log,
-  };
+function nextTurn() {
+  game.turnIndex = nextActiveIndex(game.turnIndex);
 }
 
-function doBet(player, action, amount = 0) {
-  if (game.players[game.turnIndex]?.id !== player.id) return false;
-  if (!BETTING_PHASES.includes(game.phase)) return false;
+function canSwap(player) {
+  return (
+    !player.hasSwapped &&
+    ['flopBet', 'turnBet', 'riverBet', 'preflopBet'].includes(game.phase) &&
+    game.community.length > 0
+  );
+}
 
-  const toCall = game.currentBet - player.currentBet;
+function doSwap(player, handIndex, communityIndex) {
+  if (!canSwap(player)) return { ok: false, message: 'Swap unavailable.' };
+  if (handIndex < 0 || handIndex >= player.hand.length) return { ok: false, message: 'Invalid hand card.' };
+  if (communityIndex < 0 || communityIndex >= game.community.length) {
+    return { ok: false, message: 'Invalid community card.' };
+  }
+
+  const cost = Math.ceil(game.pot * 0.5);
+  if (player.stack < cost) return { ok: false, message: 'Not enough chips for swap.' };
+
+  player.stack -= cost;
+  game.pot += cost;
+  player.hasSwapped = true;
+
+  const handCard = player.hand[handIndex];
+  const tableCard = game.community[communityIndex];
+  player.hand[handIndex] = tableCard;
+  game.community[communityIndex] = handCard;
+
+  recalculateTrump();
+  addLog(`${player.name} swapped a card for ${cost} chips.`);
+  return { ok: true };
+}
+
+function handleBetAction(player, action, amount) {
+  const need = game.currentBet - player.roundBet;
 
   if (action === 'fold') {
     player.folded = true;
-    player.inHand = false;
-    log(`${player.name} folds.`);
-  } else if (action === 'check') {
-    if (toCall !== 0) return false;
-    game.actedSinceRaise.add(player.id);
-    log(`${player.name} checks.`);
-  } else if (action === 'call') {
-    if (toCall <= 0) return false;
-    if (player.chips < toCall) return false;
-    player.chips -= toCall;
-    player.currentBet += toCall;
-    game.pot += toCall;
-    game.actedSinceRaise.add(player.id);
-    log(`${player.name} calls ${toCall}.`);
-  } else if (action === 'bet') {
-    if (game.currentBet !== 0 || amount <= 0 || amount > player.chips) return false;
-    player.chips -= amount;
-    player.currentBet += amount;
-    game.currentBet = amount;
-    game.pot += amount;
-    game.actedSinceRaise = new Set([player.id]);
-    log(`${player.name} bets ${amount}.`);
-  } else if (action === 'raise') {
-    if (game.currentBet === 0) return false;
-    if (amount <= game.currentBet) return false;
-    const delta = amount - player.currentBet;
-    if (delta <= 0 || delta > player.chips) return false;
-    player.chips -= delta;
-    player.currentBet = amount;
-    game.currentBet = amount;
-    game.pot += delta;
-    game.actedSinceRaise = new Set([player.id]);
-    log(`${player.name} raises to ${amount}.`);
-  } else {
-    return false;
+    player.acted = true;
+    addLog(`${player.name} folds.`);
+    return { ok: true };
   }
 
-  const actives = activePlayers();
-  if (actives.length <= 1) {
-    settleByFold(actives[0]);
-    return true;
+  if (action === 'check') {
+    if (need !== 0) return { ok: false, message: 'Cannot check; call is required.' };
+    player.acted = true;
+    addLog(`${player.name} checks.`);
+    return { ok: true };
   }
 
-  if (bettingRoundComplete()) proceedAfterBetting();
-  else advanceTurn();
+  if (action === 'call') {
+    if (need <= 0) return { ok: false, message: 'Nothing to call.' };
+    if (player.stack < need) return { ok: false, message: 'Not enough chips to call.' };
+    player.stack -= need;
+    player.roundBet += need;
+    game.pot += need;
+    player.acted = true;
+    addLog(`${player.name} calls ${need}.`);
+    return { ok: true };
+  }
 
-  return true;
+  if (action === 'bet') {
+    if (game.currentBet !== 0) return { ok: false, message: 'Bet not allowed; use raise.' };
+    const bet = Math.max(1, Number(amount) || 0);
+    if (player.stack < bet) return { ok: false, message: 'Not enough chips to bet.' };
+
+    player.stack -= bet;
+    player.roundBet += bet;
+    game.pot += bet;
+    game.currentBet = bet;
+
+    for (const p of inHandPlayers()) p.acted = false;
+    player.acted = true;
+
+    addLog(`${player.name} bets ${bet}.`);
+    return { ok: true };
+  }
+
+  if (action === 'raise') {
+    if (game.currentBet === 0) return { ok: false, message: 'Raise not allowed; use bet.' };
+    const raiseBy = Math.max(1, Number(amount) || 0);
+    const totalNeed = need + raiseBy;
+    if (player.stack < totalNeed) return { ok: false, message: 'Not enough chips to raise.' };
+
+    player.stack -= totalNeed;
+    player.roundBet += totalNeed;
+    game.pot += totalNeed;
+    game.currentBet += raiseBy;
+
+    for (const p of inHandPlayers()) p.acted = false;
+    player.acted = true;
+
+    addLog(`${player.name} raises ${raiseBy}.`);
+    return { ok: true };
+  }
+
+  if (action === 'swap') {
+    return { ok: false, message: 'Swap requires card indexes.' };
+  }
+
+  return { ok: false, message: 'Unknown action.' };
 }
 
-function doSwap(player, handCard, communityCard) {
-  if (game.players[game.turnIndex]?.id !== player.id) return false;
-  if (!['flopBet', 'turnBet', 'riverBet'].includes(game.phase)) return false;
-  if (player.hasSwapped) return false;
-
-  const handIdx = player.hand.indexOf(handCard);
-  const tableIdx = game.community.indexOf(communityCard);
-  if (handIdx === -1 || tableIdx === -1) return false;
-
-  const cost = Math.ceil(game.pot * 0.5);
-  if (player.chips < cost) return false;
-
-  player.chips -= cost;
-  game.pot += cost;
-  player.hand[handIdx] = communityCard;
-  game.community[tableIdx] = handCard;
-  player.hasSwapped = true;
-
-  log(`${player.name} swaps ${handCard} with ${communityCard} (cost ${cost}).`);
-  return true;
-}
-
-function doPlayCard(player, card) {
-  if (game.phase !== 'trick') return false;
-  if (game.players[game.turnIndex]?.id !== player.id) return false;
-
+function handlePlayCard(player, card) {
+  if (game.phase !== 'trick') return { ok: false, message: 'Not in trick phase.' };
   const idx = player.hand.indexOf(card);
-  if (idx === -1) return false;
+  if (idx === -1) return { ok: false, message: 'Card not in hand.' };
 
   if (game.trick.leadSuit) {
     const hasLead = player.hand.some((c) => cardSuit(c) === game.trick.leadSuit);
-    if (hasLead && cardSuit(card) !== game.trick.leadSuit) return false;
+    if (hasLead && cardSuit(card) !== game.trick.leadSuit) {
+      return { ok: false, message: 'Must follow lead suit.' };
+    }
   }
 
   player.hand.splice(idx, 1);
+  game.trick.plays.push({ playerId: player.id, card });
   if (!game.trick.leadSuit) game.trick.leadSuit = cardSuit(card);
-  game.trick.cards.push({ playerId: player.id, card });
-  log(`${player.name} plays ${card}.`);
 
-  const needed = activePlayers().length;
-  if (game.trick.cards.length === needed) {
-    const winnerId = evaluateTrickWinner(game.trick.cards, game.trick.leadSuit, getTrumpSuit());
-    const winner = game.players.find((p) => p.id === winnerId);
-    winner.tricksWon += 1;
-    log(`${winner.name} wins trick ${game.trick.index}.`);
-
-    if (activePlayers().every((p) => p.hand.length === 0)) {
-      settleByTricks();
-    } else {
-      game.trick = {
-        index: game.trick.index + 1,
-        leadSuit: null,
-        cards: [],
-        leaderIndex: game.players.indexOf(winner),
-      };
-      game.turnIndex = game.trick.leaderIndex;
-    }
-  } else {
-    advanceTurn();
+  const activeCount = inHandPlayers().length;
+  if (game.trick.plays.length < activeCount) {
+    nextTurn();
+    return { ok: true };
   }
 
-  return true;
+  const winnerId = evaluateTrickWinner(game.trick.plays, game.trick.leadSuit, game.trumpSuit);
+  const winner = game.players.find((p) => p.id === winnerId);
+  winner.tricksWon += 1;
+  addLog(`${winner.name} wins the trick.`);
+
+  const handsRemaining = inHandPlayers().some((p) => p.hand.length > 0);
+  if (!handsRemaining) {
+    settleByTricks();
+    return { ok: true };
+  }
+
+  const winnerIdx = game.players.findIndex((p) => p.id === winnerId);
+  game.turnIndex = winnerIdx;
+  game.trick = {
+    leadSuit: null,
+    plays: [],
+    leaderId: winnerId,
+  };
+
+  return { ok: true };
 }
 
-function botSwapMaybe(bot) {
-  if (bot.hasSwapped) return;
-  if (!['flopBet', 'turnBet', 'riverBet'].includes(game.phase)) return;
-  if (Math.random() > 0.2) return;
-  if (game.community.length === 0 || bot.hand.length === 0) return;
-  const cost = Math.ceil(game.pot * 0.5);
-  if (bot.chips < cost) return;
-  doSwap(bot, bot.hand[0], game.community[0]);
+function simpleBotSwapChoice(bot) {
+  if (!canSwap(bot) || game.community.length === 0) return null;
+  const swapCost = Math.ceil(game.pot * 0.5);
+  if (bot.stack < swapCost) return null;
+
+  const lowHand = bot.hand
+    .map((card, i) => ({ i, score: cardScore(card) }))
+    .sort((a, b) => a.score - b.score)[0];
+
+  const bestTable = game.community
+    .map((card, i) => ({ i, score: cardScore(card), suit: cardSuit(card) }))
+    .sort((a, b) => b.score - a.score)[0];
+
+  if (!lowHand || !bestTable) return null;
+
+  const trumpBias = game.trumpSuit && bestTable.suit === game.trumpSuit ? 2 : 0;
+  const gain = bestTable.score + trumpBias - lowHand.score;
+  if (gain < 3) return null;
+
+  if (Math.random() < 0.45) {
+    return { handIndex: lowHand.i, communityIndex: bestTable.i };
+  }
+
+  return null;
 }
 
-function botTakeTurn(bot) {
+function chooseBotBetAction(bot) {
+  const need = game.currentBet - bot.roundBet;
+
+  const swapPick = simpleBotSwapChoice(bot);
+  if (swapPick) {
+    return { type: 'swap', ...swapPick };
+  }
+
+  if (need > 0) {
+    if (need > bot.stack * 0.35 && Math.random() < 0.45) return { type: 'fold' };
+    if (bot.stack > need + 30 && Math.random() < 0.2) return { type: 'raise', amount: 20 };
+    return { type: 'call' };
+  }
+
+  if (game.currentBet === 0 && bot.stack > 30 && Math.random() < 0.22) {
+    return { type: 'bet', amount: 20 };
+  }
+
+  return { type: 'check' };
+}
+
+function chooseBotTrickCard(bot) {
+  const hand = bot.hand.slice();
+  if (!hand.length) return null;
+
+  if (!game.trick.leadSuit) {
+    return hand.sort((a, b) => cardScore(b) - cardScore(a))[0];
+  }
+
+  const leadCards = hand.filter((c) => cardSuit(c) === game.trick.leadSuit);
+  if (leadCards.length) {
+    return leadCards.sort((a, b) => cardScore(b) - cardScore(a))[0];
+  }
+
+  const trumps = game.trumpSuit ? hand.filter((c) => cardSuit(c) === game.trumpSuit) : [];
+  if (trumps.length) {
+    return trumps.sort((a, b) => cardScore(a) - cardScore(b))[0];
+  }
+
+  return hand.sort((a, b) => cardScore(a) - cardScore(b))[0];
+}
+
+function emitState(errorBySocketId = null) {
+  for (const socket of io.sockets.sockets.values()) {
+    socket.emit('state', buildStateFor(socket.id, errorBySocketId?.[socket.id] || null));
+  }
+  maybeScheduleBotTurn();
+}
+
+function buildStateFor(socketId, errorMessage) {
+  const viewer = getPlayerBySocket(socketId);
+  const viewerId = viewer ? viewer.id : null;
+
+  return {
+    viewerId,
+    phase: game.phase,
+    handNumber: game.handNumber,
+    dealerId: game.players[game.dealerIndex]?.id,
+    turnPlayerId: game.players[game.turnIndex]?.id || null,
+    pot: game.pot,
+    currentBet: game.currentBet,
+    trumpSuit: game.trumpSuit,
+    community: game.community,
+    trick: game.trick,
+    log: game.log,
+    error: errorMessage,
+    players: game.players.map((p) => ({
+      id: p.id,
+      name: p.name,
+      isBot: p.isBot,
+      connected: p.connected,
+      stack: p.stack,
+      folded: p.folded,
+      inHand: p.inHand,
+      hasSwapped: p.hasSwapped,
+      roundBet: p.roundBet,
+      tricksWon: p.tricksWon,
+      handCount: p.hand.length,
+      hand: viewerId === p.id ? p.hand : [],
+    })),
+  };
+}
+
+function maybeScheduleBotTurn() {
+  if (game.botTimer) {
+    clearTimeout(game.botTimer);
+    game.botTimer = null;
+  }
+
+  if (!['preflopBet', 'flopBet', 'turnBet', 'riverBet', 'trick'].includes(game.phase)) return;
+  const current = game.players[game.turnIndex];
+  if (!current || !current.isBot || !current.inHand || current.folded) return;
+
+  game.botTimer = setTimeout(() => {
+    game.botTimer = null;
+    runBotTurn(current);
+  }, 700);
+}
+
+function runBotTurn(bot) {
   if (game.players[game.turnIndex]?.id !== bot.id) return;
 
-  if (BETTING_PHASES.includes(game.phase)) {
-    botSwapMaybe(bot);
-    const toCall = game.currentBet - bot.currentBet;
-    if (toCall === 0) {
-      if (Math.random() < 0.2 && bot.chips >= 20) {
-        const bet = Math.min(20, bot.chips);
-        doBet(bot, 'bet', bet);
-      } else {
-        doBet(bot, 'check', 0);
-      }
+  if (['preflopBet', 'flopBet', 'turnBet', 'riverBet'].includes(game.phase)) {
+    const decision = chooseBotBetAction(bot);
+    if (decision.type === 'swap') {
+      doSwap(bot, decision.handIndex, decision.communityIndex);
+      bot.acted = true;
+      nextTurn();
+      if (isBetRoundComplete()) proceedStage();
+      emitState();
       return;
     }
 
-    const affordability = bot.chips >= toCall;
-    if (!affordability || Math.random() < 0.15) doBet(bot, 'fold', 0);
-    else doBet(bot, 'call', 0);
+    const res = handleBetAction(bot, decision.type, decision.amount || 0);
+    if (!res.ok) {
+      const fallback = handleBetAction(bot, 'check', 0);
+      if (!fallback.ok) handleBetAction(bot, 'call', 0);
+    }
+
+    if (game.phase === 'waiting') {
+      emitState();
+      return;
+    }
+
+    if (isBetRoundComplete()) {
+      proceedStage();
+    } else {
+      nextTurn();
+    }
+
+    emitState();
     return;
   }
 
   if (game.phase === 'trick') {
-    let options = [...bot.hand];
-    if (game.trick.leadSuit) {
-      const follow = bot.hand.filter((c) => cardSuit(c) === game.trick.leadSuit);
-      if (follow.length) options = follow;
-    }
-    options.sort((a, b) => RANK_VALUE[cardRank(a)] - RANK_VALUE[cardRank(b)]);
-    doPlayCard(bot, options[0]);
+    const card = chooseBotTrickCard(bot);
+    if (!card) return;
+    handlePlayCard(bot, card);
+    emitState();
   }
 }
 
-function maybeRunBots() {
-  if (!game.players.length) return;
-  const turnPlayer = game.players[game.turnIndex];
-  if (!turnPlayer || !isBot(turnPlayer)) return;
-  botTakeTurn(turnPlayer);
-}
+function processHumanAction(socketId, payload) {
+  const errors = {};
+  const actor = getPlayerBySocket(socketId);
+  if (!actor) {
+    errors[socketId] = 'You are a spectator.';
+    emitState(errors);
+    return;
+  }
 
-function parseBody(req) {
-  return new Promise((resolve) => {
-    let data = '';
-    req.on('data', (chunk) => {
-      data += chunk;
-      if (data.length > 1_000_000) req.destroy();
-    });
-    req.on('end', () => {
-      try {
-        resolve(JSON.parse(data || '{}'));
-      } catch {
-        resolve({});
+  if (!isHumanTurn(socketId) && payload.type !== 'startHand') {
+    errors[socketId] = 'Not your turn.';
+    emitState(errors);
+    return;
+  }
+
+  if (payload.type === 'startHand') {
+    if (game.phase !== 'waiting') {
+      errors[socketId] = 'Hand already in progress.';
+    } else {
+      startHand();
+    }
+    emitState(errors);
+    return;
+  }
+
+  if (['preflopBet', 'flopBet', 'turnBet', 'riverBet'].includes(game.phase)) {
+    if (payload.type === 'swap') {
+      const res = doSwap(actor, Number(payload.handIndex), Number(payload.communityIndex));
+      if (!res.ok) {
+        errors[socketId] = res.message;
+        emitState(errors);
+        return;
       }
-    });
-  });
-}
-
-function sendJson(res, status, obj) {
-  res.writeHead(status, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify(obj));
-}
-
-function serveStatic(res, pathname) {
-  const target = pathname === '/' ? '/index.html' : pathname;
-  const filePath = path.resolve(path.join(__dirname, 'public', target.slice(1)));
-  const pubRoot = path.resolve(path.join(__dirname, 'public'));
-  if (!filePath.startsWith(pubRoot)) return sendJson(res, 403, { error: 'Forbidden' });
-
-  fs.readFile(filePath, (err, data) => {
-    if (err) return sendJson(res, 404, { error: 'Not found' });
-    const ext = path.extname(filePath);
-    const type = ext === '.html'
-      ? 'text/html'
-      : ext === '.css'
-        ? 'text/css'
-        : ext === '.js'
-          ? 'application/javascript'
-          : 'text/plain';
-    res.writeHead(200, { 'Content-Type': type });
-    res.end(data);
-  });
-}
-
-function addPlayer(name, type = 'human') {
-  const player = {
-    id: `${type === 'bot' ? 'b' : 'p'}_${Math.random().toString(36).slice(2, 9)}`,
-    name,
-    type,
-    chips: 1000,
-    hand: [],
-    inHand: false,
-    folded: false,
-    hasSwapped: false,
-    tricksWon: 0,
-    currentBet: 0,
-    connected: true,
-  };
-  game.players.push(player);
-  return player;
-}
-
-http.createServer(async (req, res) => {
-  const url = new URL(req.url, 'http://localhost');
-
-  if (req.method === 'GET' && ['/', '/app.js', '/styles.css'].includes(url.pathname)) {
-    return serveStatic(res, url.pathname);
-  }
-
-  if (req.method === 'POST' && url.pathname === '/join') {
-    const body = await parseBody(req);
-    const name = String(body.name || '').trim().slice(0, 20);
-    if (!name) return sendJson(res, 400, { error: 'Name required' });
-
-    if (game.players.length >= game.maxPlayers) {
-      return sendJson(res, 400, { error: 'Table full (6 max players).' });
+      actor.acted = true;
+      if (isBetRoundComplete()) {
+        proceedStage();
+      } else {
+        nextTurn();
+      }
+      emitState();
+      return;
     }
 
-    const existing = game.players.find((p) => p.name.toLowerCase() === name.toLowerCase() && p.type === 'human');
-    if (existing) return sendJson(res, 400, { error: 'Name already taken.' });
-
-    const player = addPlayer(name, 'human');
-    log(`${player.name} joined.`);
-    return sendJson(res, 200, { playerId: player.id });
-  }
-
-  if (req.method === 'POST' && url.pathname === '/add-bot') {
-    if (game.players.length >= game.maxPlayers) {
-      return sendJson(res, 400, { error: 'Table full (6 max players).' });
+    const res = handleBetAction(actor, payload.type, payload.amount || 0);
+    if (!res.ok) {
+      errors[socketId] = res.message;
+      emitState(errors);
+      return;
     }
-    const bot = addPlayer(`Bot ${game.nextBotId}`, 'bot');
-    game.nextBotId += 1;
-    log(`${bot.name} joined.`);
-    return sendJson(res, 200, { ok: true, playerId: bot.id });
+
+    if (game.phase === 'waiting') {
+      emitState();
+      return;
+    }
+
+    if (isBetRoundComplete()) {
+      proceedStage();
+    } else {
+      nextTurn();
+    }
+
+    emitState();
+    return;
   }
 
-  if (req.method === 'POST' && url.pathname === '/leave') {
-    const body = await parseBody(req);
-    const idx = game.players.findIndex((p) => p.id === body.playerId && p.type === 'human');
-    if (idx === -1) return sendJson(res, 404, { error: 'No player' });
-    const [removed] = game.players.splice(idx, 1);
-    log(`${removed.name} left.`);
-    if (game.turnIndex >= game.players.length) game.turnIndex = 0;
-    if (activePlayers().length <= 1 && game.phase !== 'waiting') settleByFold(activePlayers()[0]);
-    return sendJson(res, 200, { ok: true });
+  if (game.phase === 'trick') {
+    if (payload.type !== 'playCard') {
+      errors[socketId] = 'Only card play is allowed now.';
+      emitState(errors);
+      return;
+    }
+
+    const res = handlePlayCard(actor, payload.card);
+    if (!res.ok) {
+      errors[socketId] = res.message;
+      emitState(errors);
+      return;
+    }
+
+    emitState();
+  }
+}
+
+io.on('connection', (socket) => {
+  const human = game.players[0];
+
+  if (!human.connected) {
+    human.connected = true;
+    human.socketId = socket.id;
+    socket.emit('assignment', { role: 'player', playerId: human.id, name: human.name });
+    addLog('Human player connected.');
+  } else {
+    socket.emit('assignment', { role: 'spectator' });
   }
 
-  if (req.method === 'POST' && url.pathname === '/reset') {
-    resetTable();
-    return sendJson(res, 200, { ok: true });
-  }
+  socket.on('startHand', () => {
+    processHumanAction(socket.id, { type: 'startHand' });
+  });
 
-  if (req.method === 'GET' && url.pathname === '/state') {
-    const playerId = url.searchParams.get('playerId');
-    return sendJson(res, 200, asState(playerId));
-  }
+  socket.on('playerAction', (payload) => {
+    processHumanAction(socket.id, payload || {});
+  });
 
-  if (req.method === 'POST' && url.pathname === '/start') {
-    const body = await parseBody(req);
-    const player = game.players.find((p) => p.id === body.playerId);
-    if (!player) return sendJson(res, 404, { error: 'No player' });
-    if (game.phase !== 'waiting') return sendJson(res, 400, { error: 'Hand already in progress.' });
-    const started = startHand();
-    if (!started) return sendJson(res, 400, { error: 'Need at least 2 connected players.' });
-    return sendJson(res, 200, { ok: true });
-  }
+  socket.on('disconnect', () => {
+    const player = getPlayerBySocket(socket.id);
+    if (player && !player.isBot) {
+      player.connected = false;
+      player.socketId = null;
+      addLog('Human player disconnected.');
+      if (game.phase !== 'waiting') {
+        game.phase = 'waiting';
+        addLog('Current hand stopped. Reconnect to start a new hand.');
+      }
+    }
+    emitState();
+  });
 
-  if (req.method === 'POST' && url.pathname === '/action') {
-    const body = await parseBody(req);
-    const player = game.players.find((p) => p.id === body.playerId);
-    if (!player) return sendJson(res, 404, { error: 'No player' });
-
-    let ok = false;
-    if (body.kind === 'bet') ok = doBet(player, body.action, Number(body.amount || 0));
-    else if (body.kind === 'swap') ok = doSwap(player, body.handCard, body.communityCard);
-    else if (body.kind === 'playCard') ok = doPlayCard(player, body.card);
-
-    if (!ok) return sendJson(res, 400, { ok: false, error: 'Illegal action for current phase/turn.' });
-    return sendJson(res, 200, { ok: true });
-  }
-
-  return sendJson(res, 404, { error: 'Unknown route' });
-}).listen(process.env.PORT || 3000, () => {
-  console.log('Trump Swap server running at http://localhost:3000');
+  emitState();
 });
 
-setInterval(maybeRunBots, 350);
+server.listen(PORT, () => {
+  // eslint-disable-next-line no-console
+  console.log(`TrumpSwap server running at http://localhost:${PORT}`);
+});
