@@ -5,7 +5,7 @@ const config = {
   parent: 'game-root',
   width: 1400,
   height: 900,
-  backgroundColor: '#05080f',
+  backgroundColor: '#040810',
   scene: [TrumpSwapScene],
   scale: {
     mode: Phaser.Scale.FIT,

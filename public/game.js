@@ -1,17 +1,27 @@
 const SUITS = ['C', 'D', 'H', 'S'];
 const RANKS = ['2', '3', '4', '5', '6', '7', '8', '9', 'T', 'J', 'Q', 'K', 'A'];
-const CARD_W = 100;
-const CARD_H = 140;
+const CARD_W = 96;
+const CARD_H = 134;
+
+const COLOR = {
+  navy: 0x071224,
+  emerald: 0x2ecc71,
+  blue: 0x3b82f6,
+  red: 0xe74c3c,
+  gold: 0xd4af37,
+  white: 0xf8fafc,
+  ink: 0x030712,
+};
 
 const SUIT_ICON = { C: '♣', D: '♦', H: '♥', S: '♠' };
-const SUIT_COLOR = { C: '#f1f5f9', D: '#fb7185', H: '#fb7185', S: '#f1f5f9' };
+const SUIT_COLOR = { C: '#F8FAFC', D: '#E74C3C', H: '#E74C3C', S: '#F8FAFC' };
 const PHASE_LABEL = {
   waiting: 'Waiting',
   preflopBet: 'Pre-Flop',
   flopBet: 'Flop',
   turnBet: 'Turn',
   riverBet: 'River',
-  trick: 'Trick Phase',
+  trick: 'Trick',
 };
 
 const DEPTH = {
@@ -21,8 +31,9 @@ const DEPTH = {
   COMMUNITY: 3,
   TRICK: 4,
   HAND: 5,
-  HUD: 6,
-  OVERLAY: 7,
+  BUTTONS: 6,
+  TOAST: 7,
+  WINNER: 8,
 };
 
 const suitOrder = Object.fromEntries(SUITS.map((s, i) => [s, i]));
@@ -50,16 +61,18 @@ export class TrumpSwapScene extends Phaser.Scene {
     this.layout = {
       w: 1400,
       h: 900,
-      center: { x: 700, y: 450 },
+      center: { x: 700, y: 470 },
       tableRx: 500,
-      tableRy: 300,
-      hudY: 56,
-      potY: 180,
-      communityY: 300,
-      trickY: 430,
-      handY: 700,
-      controlsY: 818,
-      deckPos: { x: 1025, y: 312 },
+      tableRy: 290,
+      hudY: 58,
+      lanes: {
+        potY: 108,
+        communityY: 292,
+        trickY: 450,
+        handY: 682,
+      },
+      deckPos: { x: 1030, y: 292 },
+      actionsY: 854,
     };
 
     this.seatPositions = [];
@@ -67,7 +80,8 @@ export class TrumpSwapScene extends Phaser.Scene {
 
     this.hud = {};
     this.controls = {};
-    this.logUi = {};
+    this.toast = {};
+    this.winnerFx = {};
 
     this.communityCards = [];
     this.handCards = [];
@@ -79,8 +93,12 @@ export class TrumpSwapScene extends Phaser.Scene {
 
     this.prevPot = 0;
     this.prevTrump = null;
+    this.potDisplayValue = 0;
+    this.potTween = null;
     this.betValue = 20;
-    this.logScroll = 0;
+
+    this.handWinnerFxRunning = false;
+    this.trickGlowTween = null;
   }
 
   preload() {
@@ -96,141 +114,127 @@ export class TrumpSwapScene extends Phaser.Scene {
   create() {
     this.createBackground();
     this.createHud();
-    this.createTableZones();
+    this.createTableLayers();
     this.createSeats();
-    this.createActionBar();
-    this.createLogPanel();
+    this.createActionSystem();
+    this.createToastSystem();
+    this.createWinnerFxLayer();
     this.setupSocket();
 
     const startBtn = document.getElementById('startHandBtn');
     startBtn.addEventListener('click', () => this.socket.emit('startHand'));
+    this.updateStartHandButtonState();
   }
 
   createBackground() {
     const { w, h, center, tableRx, tableRy } = this.layout;
 
-    this.add.rectangle(w / 2, h / 2, w, h, 0x050913).setDepth(DEPTH.BG);
+    this.add.rectangle(w / 2, h / 2, w, h, COLOR.navy, 1).setDepth(DEPTH.BG);
+
+    const grad = this.add.graphics().setDepth(DEPTH.BG);
+    grad.fillGradientStyle(COLOR.navy, COLOR.navy, COLOR.ink, COLOR.ink, 0.6);
+    grad.fillRect(0, 0, w, h);
 
     this.add
-      .ellipse(center.x, center.y, tableRx * 2 + 75, tableRy * 2 + 70, 0x2a1d12, 0.95)
-      .setStrokeStyle(4, 0x7b5b3e, 0.55)
+      .ellipse(center.x, center.y + 2, tableRx * 2 + 34, tableRy * 2 + 34, 0x0d2b22, 0.95)
       .setDepth(DEPTH.TABLE);
 
     this.add
-      .ellipse(center.x, center.y, tableRx * 2 + 20, tableRy * 2 + 20, 0x0c331d, 0.95)
-      .setStrokeStyle(8, 0x113922, 0.9)
+      .ellipse(center.x, center.y, tableRx * 2, tableRy * 2, 0x145c40, 0.95)
       .setDepth(DEPTH.TABLE);
 
-    this.add
-      .ellipse(center.x, center.y, tableRx * 2, tableRy * 2, 0x15643a, 0.97)
-      .setStrokeStyle(1, 0x1f8c52, 0.5)
-      .setDepth(DEPTH.TABLE);
-
-    const noise = this.add.graphics().setDepth(DEPTH.TABLE);
-    for (let i = 0; i < 220; i += 1) {
-      noise.fillStyle(0xffffff, Phaser.Math.FloatBetween(0.02, 0.07));
-      noise.fillCircle(
-        center.x + Phaser.Math.Between(-470, 470),
-        center.y + Phaser.Math.Between(-260, 260),
-        Phaser.Math.Between(1, 2)
-      );
+    const felt = this.add.graphics().setDepth(DEPTH.TABLE);
+    for (let i = 0; i < 280; i += 1) {
+      felt.fillStyle(COLOR.white, Phaser.Math.FloatBetween(0.01, 0.035));
+      felt.fillCircle(center.x + Phaser.Math.Between(-470, 470), center.y + Phaser.Math.Between(-260, 260), 1);
     }
   }
 
   createHud() {
-    const { w, hudY, potY, center } = this.layout;
+    const { w, hudY, center } = this.layout;
 
-    const top = this.add.rectangle(w / 2, hudY, w - 40, 84, 0x0a1323, 0.9).setDepth(DEPTH.HUD);
-    top.setStrokeStyle(1, 0x3d5066, 0.9);
+    this.hud.strip = this.add.rectangle(w / 2, hudY, w - 40, 74, COLOR.ink, 0.32).setDepth(DEPTH.BUTTONS);
 
     this.hud.phase = this.add
-      .text(36, 30, 'Phase: Waiting', {
+      .text(34, 28, 'Phase', {
         fontFamily: 'Rajdhani, Segoe UI, sans-serif',
-        fontSize: '28px',
-        color: '#f8fafc',
-        fontStyle: '700',
+        fontSize: '18px',
+        color: '#F8FAFC',
+        fontStyle: '600',
       })
-      .setDepth(DEPTH.HUD);
+      .setDepth(DEPTH.BUTTONS);
 
     this.hud.turn = this.add
-      .text(36, 60, 'Turn: -', {
+      .text(34, 47, 'Turn', {
         fontFamily: 'Rajdhani, Segoe UI, sans-serif',
-        fontSize: '22px',
-        color: '#cbd5e1',
-        fontStyle: '600',
+        fontSize: '26px',
+        color: '#F8FAFC',
+        fontStyle: '700',
       })
-      .setDepth(DEPTH.HUD);
+      .setDepth(DEPTH.BUTTONS);
+
+    this.hud.potLabel = this.add
+      .text(center.x, 22, 'POT', {
+        fontFamily: 'Rajdhani, Segoe UI, sans-serif',
+        fontSize: '16px',
+        color: '#F8FAFC',
+        fontStyle: '600',
+        letterSpacing: 2,
+      })
+      .setOrigin(0.5)
+      .setDepth(DEPTH.BUTTONS);
 
     this.hud.pot = this.add
-      .text(center.x - 75, 40, 'POT 0', {
+      .text(center.x, 52, '0', {
         fontFamily: 'Rajdhani, Segoe UI, sans-serif',
-        fontSize: '44px',
-        color: '#fde68a',
+        fontSize: '52px',
+        color: '#F8FAFC',
         fontStyle: '700',
       })
-      .setDepth(DEPTH.HUD);
+      .setOrigin(0.5)
+      .setDepth(DEPTH.BUTTONS);
 
     this.hud.trumpIcon = this.add
-      .text(w - 120, 39, '-', {
+      .text(w - 96, 50, '-', {
         fontFamily: 'Rajdhani, Segoe UI, sans-serif',
-        fontSize: '56px',
-        color: '#f1f5f9',
+        fontSize: '62px',
+        color: '#F8FAFC',
         fontStyle: '700',
       })
-      .setDepth(DEPTH.HUD);
-
-    this.hud.trumpLabel = this.add
-      .text(w - 228, 30, 'Trump', {
-        fontFamily: 'Rajdhani, Segoe UI, sans-serif',
-        fontSize: '24px',
-        color: '#d1d5db',
-        fontStyle: '600',
-      })
-      .setDepth(DEPTH.HUD);
-
-    this.hud.status = this.add
-      .text(38, 98, '', {
-        fontFamily: 'Rajdhani, Segoe UI, sans-serif',
-        fontSize: '20px',
-        color: '#93c5fd',
-        fontStyle: '600',
-      })
-      .setDepth(DEPTH.HUD);
-
-    this.hud.potChips = this.add.container(center.x + 88, potY).setDepth(DEPTH.HUD);
-    this.hud.potChips.add([
-      this.add.circle(-10, 7, 18, 0x1d4ed8, 1).setStrokeStyle(2, 0xdbeafe, 0.8),
-      this.add.circle(10, 7, 18, 0xb91c1c, 1).setStrokeStyle(2, 0xfee2e2, 0.8),
-      this.add.circle(0, -7, 18, 0x0f766e, 1).setStrokeStyle(2, 0xccfbf1, 0.8),
-    ]);
-
-    this.hud.event = this.add
-      .text(center.x - 160, 535, '', {
-        fontFamily: 'Rajdhani, Segoe UI, sans-serif',
-        fontSize: '24px',
-        color: '#f8fafc',
-        fontStyle: '700',
-      })
-      .setDepth(DEPTH.OVERLAY);
+      .setOrigin(0.5)
+      .setDepth(DEPTH.BUTTONS);
   }
 
-  createTableZones() {
+  createTableLayers() {
     const c = this.layout.center;
+    const { lanes } = this.layout;
 
     this.add
-      .rectangle(c.x, this.layout.potY, 320, 60, 0x0b1220, 0.2)
-      .setStrokeStyle(1, 0xe2e8f0, 0.18)
+      .text(c.x, lanes.communityY - CARD_H / 2 - 24, 'COMMUNITY', {
+        fontFamily: 'Rajdhani, Segoe UI, sans-serif',
+        fontSize: '17px',
+        color: '#F8FAFC',
+        fontStyle: '600',
+      })
+      .setOrigin(0.5)
+      .setAlpha(0.75)
       .setDepth(DEPTH.TABLE);
+
+    this.trickZoneGlow = this.add
+      .ellipse(c.x, lanes.trickY, 470, 174, COLOR.blue, 0.08)
+      .setDepth(DEPTH.TRICK)
+      .setVisible(false);
 
     this.add
-      .rectangle(c.x, this.layout.communityY, 720, 170, 0x0b1220, 0.2)
-      .setStrokeStyle(1, 0xe2e8f0, 0.2)
+      .text(c.x, lanes.trickY - CARD_H / 2 - 24, 'TRICK', {
+        fontFamily: 'Rajdhani, Segoe UI, sans-serif',
+        fontSize: '17px',
+        color: '#F8FAFC',
+        fontStyle: '600',
+      })
+      .setOrigin(0.5)
+      .setAlpha(0.75)
       .setDepth(DEPTH.TABLE);
-
-    this.trickZone = this.add
-      .ellipse(c.x, this.layout.trickY, 460, 160, 0x0f172a, 0.22)
-      .setStrokeStyle(2, 0xcbd5e1, 0.28)
-      .setDepth(DEPTH.TRICK);
   }
 
   createSeats() {
@@ -238,131 +242,148 @@ export class TrumpSwapScene extends Phaser.Scene {
 
     for (let i = 0; i < 6; i += 1) {
       const a = Phaser.Math.DegToRad(90 - i * 60);
-      const x = center.x + Math.cos(a) * tableRx;
-      const y = center.y + Math.sin(a) * tableRy;
+      const x = center.x + Math.cos(a) * (tableRx + 78);
+      const y = center.y + Math.sin(a) * (tableRy + 56);
       this.seatPositions.push({ x, y });
 
       const root = this.add.container(x, y).setDepth(DEPTH.SEATS);
-      const activeGlow = this.add.ellipse(0, 0, 182, 78, 0x22c55e, 0.12).setVisible(false);
-      activeGlow.setStrokeStyle(2, 0x4ade80, 0.9);
+      const activeGlow = this.add.ellipse(0, 0, 184, 68, COLOR.emerald, 0.12).setVisible(false);
+      const panel = this.add.rectangle(0, 0, 170, 56, COLOR.ink, 0.52);
 
-      const panel = this.add
-        .rectangle(0, 0, 170, 62, 0x081220, 0.74)
-        .setStrokeStyle(1, 0x475569, 0.45);
-
-      const avatar = this.add.circle(-65, 0, 17, 0x1f2937, 1).setStrokeStyle(2, 0x94a3b8, 0.7);
-      const avatarLetter = this.add
-        .text(-65, -1, '?', {
-          fontFamily: 'Rajdhani, Segoe UI, sans-serif',
-          fontSize: '15px',
-          color: '#f8fafc',
-          fontStyle: '700',
-        })
-        .setOrigin(0.5);
-
-      const name = this.add.text(-42, -18, 'Seat', {
+      const name = this.add.text(-50, -18, 'Seat', {
         fontFamily: 'Rajdhani, Segoe UI, sans-serif',
-        fontSize: '17px',
-        color: '#f8fafc',
+        fontSize: '16px',
+        color: '#F8FAFC',
         fontStyle: '700',
       });
 
-      const stack = this.add.text(-42, 4, '0', {
+      const stack = this.add.text(-50, -2, '$0', {
         fontFamily: 'Rajdhani, Segoe UI, sans-serif',
-        fontSize: '18px',
-        color: '#fcd34d',
+        fontSize: '16px',
+        color: '#F8FAFC',
         fontStyle: '700',
       });
 
-      const cards = this.add.text(43, 8, '0', {
+      const cards = this.add.text(38, 0, '0 cards', {
         fontFamily: 'Rajdhani, Segoe UI, sans-serif',
         fontSize: '13px',
-        color: '#cbd5e1',
+        color: '#F8FAFC',
         fontStyle: '600',
       });
 
-      const dealer = this.add.circle(70, -20, 9, 0xffffff, 1).setVisible(false);
+      const dealer = this.add.circle(71, -16, 8, COLOR.white, 1).setVisible(false);
       const dealerT = this.add
-        .text(70, -20, 'D', {
+        .text(71, -16, 'D', {
           fontFamily: 'Rajdhani, Segoe UI, sans-serif',
-          fontSize: '11px',
-          color: '#111827',
+          fontSize: '10px',
+          color: '#071224',
           fontStyle: '700',
         })
         .setOrigin(0.5)
         .setVisible(false);
 
-      root.add([activeGlow, panel, avatar, avatarLetter, name, stack, cards, dealer, dealerT]);
+      root.add([activeGlow, panel, name, stack, cards, dealer, dealerT]);
 
-      this.seatUi.set(i, { root, activeGlow, panel, avatarLetter, name, stack, cards, dealer, dealerT });
+      this.seatUi.set(i, {
+        root,
+        panel,
+        activeGlow,
+        activeTween: null,
+        name,
+        stack,
+        cards,
+        dealer,
+        dealerT,
+      });
     }
   }
 
-  createActionBar() {
-    const c = this.layout.center;
+  createActionSystem() {
+    const y = this.layout.actionsY;
 
-    const panel = this.add.container(c.x, this.layout.controlsY).setDepth(DEPTH.HUD);
-    const bg = this.add.graphics();
-    bg.fillStyle(0x081120, 0.92);
-    bg.lineStyle(2, 0x3a4f66, 0.9);
-    bg.fillRoundedRect(-500, -68, 1000, 136, 18);
-    bg.strokeRoundedRect(-500, -68, 1000, 136, 18);
-    panel.add(bg);
+    this.controls.fold = this.createPillButton(112, y, 96, 40, 'Fold', COLOR.red, () => this.sendAction({ type: 'fold' }));
+    this.controls.primary = this.createPillButton(700, y, 210, 54, 'Check', COLOR.blue, () => this.handlePrimaryActionClick());
+    this.controls.swap = this.createPillButton(1288, y, 104, 40, 'Swap', COLOR.gold, () => this.handleSwapButton());
 
-    this.controls.fold = this.createButton(panel, -390, -20, 'Fold', 0xb91c1c, () => this.sendAction({ type: 'fold' }));
-    this.controls.check = this.createButton(panel, -255, -20, 'Check', 0x2563eb, () => this.sendAction({ type: 'check' }));
-    this.controls.call = this.createButton(panel, -120, -20, 'Call', 0x1d4ed8, () => this.sendAction({ type: 'call' }));
-    this.controls.bet = this.createButton(panel, 15, -20, 'Bet', 0x15803d, () => this.sendAction({ type: 'bet', amount: this.getBetAmount() }));
-    this.controls.raise = this.createButton(panel, 150, -20, 'Raise', 0x16a34a, () => this.sendAction({ type: 'raise', amount: this.getBetAmount() }));
-    this.controls.swap = this.createButton(panel, 285, -20, 'Swap', 0xb7791f, () => this.handleSwapButton());
-
-    const sliderTrack = this.add.rectangle(-20, 28, 360, 10, 0x1f2937, 1).setOrigin(0.5);
-    const sliderFill = this.add.rectangle(-200, 28, 0, 10, 0x22c55e, 1).setOrigin(0, 0.5);
-    const sliderHandle = this.add
-      .circle(-200, 28, 12, 0xe5e7eb, 1)
-      .setStrokeStyle(2, 0x94a3b8, 0.9)
+    this.controls.sliderTrack = this.add.rectangle(580, y - 52, 240, 8, COLOR.ink, 0.8).setOrigin(0, 0.5).setDepth(DEPTH.BUTTONS);
+    this.controls.sliderFill = this.add.rectangle(580, y - 52, 0, 8, COLOR.emerald, 1).setOrigin(0, 0.5).setDepth(DEPTH.BUTTONS);
+    this.controls.sliderHandle = this.add
+      .circle(580, y - 52, 9, COLOR.white, 1)
+      .setDepth(DEPTH.BUTTONS)
       .setInteractive({ draggable: true, useHandCursor: true });
 
-    const sliderLabel = this.add
-      .text(250, 17, 'Bet: 20', {
+    this.controls.sliderLabel = this.add
+      .text(700, y - 73, 'Bet: 20', {
         fontFamily: 'Rajdhani, Segoe UI, sans-serif',
-        fontSize: '24px',
-        color: '#e2e8f0',
+        fontSize: '18px',
+        color: '#F8FAFC',
         fontStyle: '700',
       })
-      .setOrigin(0.5);
+      .setOrigin(0.5)
+      .setDepth(DEPTH.BUTTONS);
 
-    sliderHandle.on('drag', (pointer, dragX) => {
-      const min = -200;
-      const max = 160;
-      sliderHandle.x = Phaser.Math.Clamp(dragX, min, max);
-      const t = (sliderHandle.x - min) / (max - min);
+    this.controls.sliderHandle.on('drag', (pointer, dragX) => {
+      const min = 580;
+      const max = 820;
+      this.controls.sliderHandle.x = Phaser.Math.Clamp(dragX, min, max);
+      const t = (this.controls.sliderHandle.x - min) / (max - min);
       const me = this.getMe();
       const maxBet = me ? Math.max(1, me.stack) : 1000;
       this.betValue = Math.max(1, Math.floor(1 + t * (maxBet - 1)));
-      sliderFill.width = 360 * t;
-      sliderLabel.setText(`Bet: ${this.betValue}`);
+      this.controls.sliderFill.width = 240 * t;
+      this.controls.sliderLabel.setText(`Bet: ${this.betValue}`);
+      if (!this.controls.wagerMode) this.controls.wagerMode = true;
+      this.updateControls();
     });
 
-    panel.add([sliderTrack, sliderFill, sliderHandle, sliderLabel]);
+    this.controls.wagerMode = false;
+    this.controls.primaryLongPressTriggered = false;
+    this.controls.primaryHoldTimer = null;
 
-    this.controls.panel = panel;
-    this.controls.sliderFill = sliderFill;
-    this.controls.sliderHandle = sliderHandle;
-    this.controls.sliderLabel = sliderLabel;
+    this.controls.primary.hit.on('pointerdown', () => {
+      const me = this.getMe();
+      if (!me || this.controls.primary.disabled || this.controls.wagerMode) return;
+      const need = this.state ? this.state.currentBet - me.roundBet : 0;
+      if (!this.canEnterWagerMode(me, need)) return;
+      this.controls.primaryHoldTimer = this.time.delayedCall(300, () => {
+        this.controls.primaryLongPressTriggered = true;
+        this.controls.wagerMode = true;
+        this.updateControls();
+      });
+    });
+
+    this.controls.primary.hit.on('pointerup', () => {
+      if (this.controls.primaryHoldTimer) {
+        this.controls.primaryHoldTimer.remove(false);
+        this.controls.primaryHoldTimer = null;
+      }
+    });
+
+    this.controls.primary.hit.on('pointerout', () => {
+      if (this.controls.primaryHoldTimer) {
+        this.controls.primaryHoldTimer.remove(false);
+        this.controls.primaryHoldTimer = null;
+      }
+    });
+
+    this.controls.sliderTrack.setVisible(false);
+    this.controls.sliderFill.setVisible(false);
+    this.controls.sliderHandle.setVisible(false);
+    this.controls.sliderLabel.setVisible(false);
   }
 
-  createButton(parent, x, y, label, color, onClick) {
-    const g = this.add.graphics();
-    const hit = this.add.zone(x, y, 120, 48).setOrigin(0.5).setInteractive({ useHandCursor: true });
+  createPillButton(x, y, w, h, label, color, onClick) {
+    const g = this.add.graphics().setDepth(DEPTH.BUTTONS);
+    const hit = this.add.zone(x, y, w, h).setOrigin(0.5).setDepth(DEPTH.BUTTONS).setInteractive({ useHandCursor: true });
     const text = this.add
       .text(x, y, label, {
         fontFamily: 'Rajdhani, Segoe UI, sans-serif',
-        fontSize: '22px',
-        color: '#f8fafc',
+        fontSize: `${Math.round(h * 0.42)}px`,
+        color: '#F8FAFC',
         fontStyle: '700',
       })
-      .setOrigin(0.5);
+      .setOrigin(0.5)
+      .setDepth(DEPTH.BUTTONS);
 
     const btn = {
       g,
@@ -370,88 +391,102 @@ export class TrumpSwapScene extends Phaser.Scene {
       text,
       x,
       y,
-      w: 120,
-      h: 48,
+      w,
+      h,
       baseColor: color,
       disabled: false,
-      draw: (hover = false) => {
-        const fill = btn.disabled ? 0x334155 : btn.baseColor;
-        const alpha = btn.disabled ? 0.45 : 0.96;
+      draw: (state = 'idle') => {
+        const off = btn.disabled;
+        let fill = btn.baseColor;
+        let alpha = 0.95;
+        if (off) {
+          fill = 0x324055;
+          alpha = 0.42;
+        }
+        if (!off && state === 'hover') alpha = 1;
+        if (!off && state === 'pressed') alpha = 0.8;
+
         g.clear();
         g.fillStyle(fill, alpha);
-        g.lineStyle(1, 0xe2e8f0, btn.disabled ? 0.2 : 0.35);
-        g.fillRoundedRect(x - 60, y - 24, 120, 48, 12);
-        g.strokeRoundedRect(x - 60, y - 24, 120, 48, 12);
-        if (hover && !btn.disabled) {
-          g.lineStyle(2, 0xffffff, 0.35);
-          g.strokeRoundedRect(x - 61, y - 25, 122, 50, 12);
-        }
-        text.setAlpha(btn.disabled ? 0.5 : 1);
+        g.fillRoundedRect(x - w / 2, y - h / 2, w, h, h / 2);
+        text.setAlpha(off ? 0.5 : 1);
       },
     };
 
-    btn.draw(false);
-
-    hit.on('pointerover', () => btn.draw(true));
-    hit.on('pointerout', () => btn.draw(false));
+    btn.draw('idle');
+    hit.on('pointerover', () => btn.draw('hover'));
+    hit.on('pointerout', () => btn.draw('idle'));
     hit.on('pointerdown', () => {
       if (btn.disabled) return;
-      this.tweens.add({ targets: [g, text], scale: 0.96, yoyo: true, duration: 90 });
+      btn.draw('pressed');
+    });
+    hit.on('pointerup', () => {
+      if (btn.disabled) return;
+      btn.draw('hover');
+      this.tweens.add({ targets: text, scale: 0.96, yoyo: true, duration: 90 });
       onClick();
     });
 
-    parent.add([g, hit, text]);
     return btn;
   }
 
-  createLogPanel() {
-    const x = this.layout.w - 22;
-    const y = this.layout.h - 16;
-
-    const container = this.add.container(x, y).setDepth(DEPTH.OVERLAY);
-    const toggle = this.add
-      .text(-232, -210, 'LOG ▾', {
+  createToastSystem() {
+    const { center, lanes } = this.layout;
+    const container = this.add.container(center.x, lanes.potY + 42).setDepth(DEPTH.TOAST).setAlpha(0).setVisible(false);
+    const bg = this.add.rectangle(0, 0, 420, 44, COLOR.ink, 0.82);
+    const txt = this.add
+      .text(0, 0, '', {
         fontFamily: 'Rajdhani, Segoe UI, sans-serif',
-        fontSize: '18px',
-        color: '#e2e8f0',
-        backgroundColor: '#0b1220',
-        padding: { x: 10, y: 4 },
+        fontSize: '24px',
+        color: '#F8FAFC',
+        fontStyle: '700',
       })
-      .setInteractive({ useHandCursor: true });
+      .setOrigin(0.5);
+    container.add([bg, txt]);
 
-    const panel = this.add.rectangle(-145, -105, 290, 190, 0x0b1220, 0.92);
-    panel.setStrokeStyle(1, 0x3b4c63, 0.9);
-    const content = this.add.text(-275, -190, '', {
-      fontFamily: 'Rajdhani, Segoe UI, sans-serif',
-      fontSize: '16px',
-      color: '#a3b8cf',
-      lineSpacing: 2,
-      wordWrap: { width: 255 },
+    this.toast = { container, bg, txt, tween: null };
+  }
+
+  showToast(message, duration = 1200) {
+    if (!message) return;
+    const { container, txt } = this.toast;
+    if (this.toast.tween) this.toast.tween.remove(false);
+
+    txt.setText(message);
+    container.setVisible(true);
+    container.alpha = 0;
+
+    this.tweens.add({ targets: container, alpha: 1, duration: 140, ease: 'Sine.easeOut' });
+    this.toast.tween = this.tweens.add({
+      targets: container,
+      alpha: 0,
+      duration: 220,
+      delay: duration,
+      ease: 'Sine.easeIn',
+      onComplete: () => {
+        container.setVisible(false);
+        this.toast.tween = null;
+      },
     });
+  }
 
-    const maskG = this.add.graphics();
-    maskG.fillRect(this.layout.w - 284, this.layout.h - 206, 255, 164);
-    content.setMask(maskG.createGeometryMask());
+  createWinnerFxLayer() {
+    const { w, h, center } = this.layout;
 
-    container.add([panel, content, toggle]);
+    const darken = this.add.rectangle(w / 2, h / 2, w, h, 0x000000, 0).setDepth(DEPTH.WINNER).setVisible(false);
+    const banner = this.add.container(center.x, center.y - 20).setDepth(DEPTH.WINNER).setVisible(false);
+    const bannerBg = this.add.rectangle(0, 0, 760, 114, COLOR.ink, 0.94);
+    const bannerText = this.add
+      .text(0, 0, 'WINNER: -', {
+        fontFamily: 'Rajdhani, Segoe UI, sans-serif',
+        fontSize: '56px',
+        color: '#F8FAFC',
+        fontStyle: '700',
+      })
+      .setOrigin(0.5);
+    banner.add([bannerBg, bannerText]);
 
-    let open = true;
-    toggle.on('pointerdown', () => {
-      open = !open;
-      panel.setVisible(open);
-      content.setVisible(open);
-      toggle.setText(open ? 'LOG ▾' : 'LOG ▸');
-    });
-
-    this.input.on('wheel', (pointer, gameObjects, dx, dy) => {
-      if (!open) return;
-      const within = pointer.x > this.layout.w - 290 && pointer.x < this.layout.w - 20 && pointer.y > this.layout.h - 210;
-      if (!within) return;
-      this.logScroll = Phaser.Math.Clamp(this.logScroll + dy * 0.3, 0, 800);
-      content.y = -190 - this.logScroll;
-    });
-
-    this.logUi = { container, panel, content, toggle, open: () => open };
+    this.winnerFx = { darken, banner, bannerText, seatGlow: null };
   }
 
   setupSocket() {
@@ -460,8 +495,9 @@ export class TrumpSwapScene extends Phaser.Scene {
   }
 
   onState(nextState) {
-    this.pendingSwapAnimation = this.detectSwap(nextState);
+    const prev = this.state;
 
+    this.pendingSwapAnimation = this.detectSwap(nextState);
     this.prevState = this.state;
     this.state = nextState;
 
@@ -471,7 +507,13 @@ export class TrumpSwapScene extends Phaser.Scene {
     this.renderHand();
     this.renderTrick();
     this.updateControls();
-    this.updateSwapBadge();
+    this.updateSeatActionFeedback(prev, this.state);
+    this.updateStartHandButtonState();
+
+    if (this.isHandFinished(this.state, prev)) {
+      const winner = this.detectHandWinner();
+      if (winner) this.playWinnerSequence(winner);
+    }
 
     this.prevPot = this.state.pot;
     this.prevTrump = this.state.trumpSuit;
@@ -484,40 +526,39 @@ export class TrumpSwapScene extends Phaser.Scene {
     this.hud.phase.setText(`Phase: ${phaseLabel}`);
     this.hud.turn.setText(`Turn: ${turnPlayer ? turnPlayer.name : '-'}`);
 
-    this.hud.pot.setText(`POT ${this.state.pot}`);
-    if (this.state.pot !== this.prevPot) {
-      this.tweens.add({ targets: [this.hud.pot, this.hud.potChips], scale: 1.12, yoyo: true, duration: 180 });
-    }
+    this.animatePotTo(this.state.pot ?? 0);
 
     if (this.state.trumpSuit) {
       this.hud.trumpIcon.setText(SUIT_ICON[this.state.trumpSuit]);
       this.hud.trumpIcon.setColor(SUIT_COLOR[this.state.trumpSuit]);
     } else {
       this.hud.trumpIcon.setText('-');
-      this.hud.trumpIcon.setColor('#e2e8f0');
+      this.hud.trumpIcon.setColor('#F8FAFC');
     }
 
     if (this.prevTrump && this.state.trumpSuit && this.prevTrump !== this.state.trumpSuit) {
-      this.tweens.add({ targets: this.hud.trumpIcon, scale: 1.25, yoyo: true, duration: 120, repeat: 2 });
-      this.tweens.add({ targets: this.hud.trumpIcon, alpha: 0.4, yoyo: true, duration: 95, repeat: 2 });
+      this.tweens.add({ targets: this.hud.trumpIcon, scale: 1.22, yoyo: true, duration: 140 });
     }
+  }
 
-    if (this.state.error) {
-      this.hud.status.setColor('#fca5a5');
-      this.hud.status.setText(`Error: ${this.state.error}`);
-    } else if (this.swapMode) {
-      this.hud.status.setColor('#fcd34d');
-      this.hud.status.setText('Swap mode: pick one hand card and one community card, then click Swap.');
-    } else if (this.state.phase === 'trick') {
-      this.hud.status.setColor('#93c5fd');
-      this.hud.status.setText('Trick zone active: play a card and follow lead suit.');
-    } else {
-      this.hud.status.setColor('#93c5fd');
-      this.hud.status.setText('Betting: Fold, Check, Call, Bet, Raise, or Swap.');
-    }
-
-    const logLines = (this.state.log || []).join('\n');
-    this.logUi.content.setText(logLines);
+  animatePotTo(target) {
+    if (this.potTween) this.potTween.remove(false);
+    const from = Number.isFinite(this.potDisplayValue) ? this.potDisplayValue : 0;
+    this.potTween = this.tweens.addCounter({
+      from,
+      to: target,
+      duration: 320,
+      ease: 'Cubic.easeOut',
+      onUpdate: (tw) => {
+        this.potDisplayValue = Math.round(tw.getValue());
+        this.hud.pot.setText(`${this.potDisplayValue}`);
+      },
+      onComplete: () => {
+        this.potDisplayValue = target;
+        this.hud.pot.setText(`${target}`);
+        this.potTween = null;
+      },
+    });
   }
 
   renderSeats() {
@@ -526,40 +567,67 @@ export class TrumpSwapScene extends Phaser.Scene {
     for (let i = 0; i < 6; i += 1) {
       const p = this.state.players[i];
       const ui = this.seatUi.get(i);
+
       if (!p) {
         ui.root.setVisible(false);
         continue;
       }
 
       ui.root.setVisible(true);
-      ui.avatarLetter.setText((p.name || '?').slice(0, 1).toUpperCase());
-      ui.name.setText(`${p.name}${p.isBot ? ' [BOT]' : ''}`);
-      ui.stack.setText(`${p.stack}`);
+      ui.name.setText(`${p.name}${p.isBot ? ' BOT' : ''}`);
+      ui.stack.setText(`$${p.stack}`);
       ui.cards.setText(`${p.handCount} cards`);
-
       ui.dealer.setVisible(this.state.dealerId === p.id);
       ui.dealerT.setVisible(this.state.dealerId === p.id);
 
       if (p.folded) {
-        ui.root.setAlpha(0.5);
-        ui.panel.setFillStyle(0x18181b, 0.45);
-        ui.name.setColor('#71717a');
-        ui.stack.setColor('#71717a');
+        ui.root.setAlpha(0.42);
       } else {
         ui.root.setAlpha(1);
-        ui.panel.setFillStyle(0x081220, 0.74);
-        ui.name.setColor('#f8fafc');
-        ui.stack.setColor('#fcd34d');
       }
 
       const active = p.id === turnId;
       ui.activeGlow.setVisible(active);
-      ui.panel.setStrokeStyle(active ? 2 : 1, active ? 0x22c55e : 0x475569, active ? 0.95 : 0.45);
-      if (active) {
-        this.tweens.add({ targets: ui.activeGlow, alpha: 0.25, yoyo: true, duration: 420, repeat: -1 });
-      } else {
-        this.tweens.killTweensOf(ui.activeGlow);
-        ui.activeGlow.alpha = 1;
+      if (active && !ui.activeTween) {
+        ui.activeTween = this.tweens.add({ targets: ui.activeGlow, alpha: 0.22, yoyo: true, duration: 420, repeat: -1 });
+      }
+      if (!active && ui.activeTween) {
+        ui.activeTween.remove(false);
+        ui.activeTween = null;
+      }
+    }
+  }
+
+  updateSeatActionFeedback(prev, next) {
+    if (!prev || !next) return;
+
+    for (const p of next.players) {
+      const old = prev.players.find((x) => x.id === p.id);
+      if (!old) continue;
+      const delta = old.stack - p.stack;
+      if (delta > 0) {
+        const idx = next.players.findIndex((x) => x.id === p.id);
+        const seat = this.seatPositions[idx];
+        if (!seat) continue;
+
+        const t = this.add
+          .text(seat.x, seat.y - 34, `-${delta}`, {
+            fontFamily: 'Rajdhani, Segoe UI, sans-serif',
+            fontSize: '22px',
+            color: '#3B82F6',
+            fontStyle: '700',
+          })
+          .setOrigin(0.5)
+          .setDepth(DEPTH.TOAST);
+
+        this.tweens.add({
+          targets: t,
+          y: t.y - 28,
+          alpha: 0,
+          duration: 650,
+          ease: 'Sine.easeOut',
+          onComplete: () => t.destroy(),
+        });
       }
     }
   }
@@ -575,17 +643,15 @@ export class TrumpSwapScene extends Phaser.Scene {
     const root = this.add.container(x, y).setDepth(options.depth || DEPTH.COMMUNITY);
 
     const g = this.add.graphics();
-    g.fillStyle(0x000000, 0.2);
-    g.fillRoundedRect(-w / 2 + 3, -h / 2 + 4, w, h, 10);
+    g.fillStyle(0x000000, 0.28);
+    g.fillRoundedRect(-w / 2 + 4, -h / 2 + 6, w, h, 12);
     g.fillStyle(0xffffff, 1);
-    g.lineStyle(1, 0xd1d5db, 1);
-    g.fillRoundedRect(-w / 2, -h / 2, w, h, 10);
-    g.strokeRoundedRect(-w / 2, -h / 2, w, h, 10);
+    g.fillRoundedRect(-w / 2, -h / 2, w, h, 12);
 
     const key = cardCode === 'BACK' ? 'card-BACK' : `card-${cardCode}`;
     const img = this.add.image(0, 0, key);
     this.cropPadding(img, key);
-    img.setDisplaySize(w - 10, h - 10);
+    img.setDisplaySize(w - 12, h - 12);
 
     const hit = this.add.zone(0, 0, w, h).setOrigin(0.5);
     if (options.interactive) hit.setInteractive({ useHandCursor: true });
@@ -594,8 +660,14 @@ export class TrumpSwapScene extends Phaser.Scene {
 
     if (options.onClick) hit.on('pointerdown', options.onClick);
     if (options.hover) {
-      hit.on('pointerover', () => this.tweens.add({ targets: root, y: root.y - 12, scale: 1.04, duration: 100 }));
-      hit.on('pointerout', () => this.tweens.add({ targets: root, y: options.baseY ?? y, scale: 1, duration: 100 }));
+      hit.on('pointerover', () => {
+        this.tweens.killTweensOf(root);
+        this.tweens.add({ targets: root, y: (options.baseY ?? y) - 20, scale: 1.05, duration: 120, ease: 'Sine.easeOut' });
+      });
+      hit.on('pointerout', () => {
+        this.tweens.killTweensOf(root);
+        this.tweens.add({ targets: root, y: options.baseY ?? y, scale: 1, duration: 120, ease: 'Sine.easeOut' });
+      });
     }
 
     return { root, hit, cardCode };
@@ -614,9 +686,9 @@ export class TrumpSwapScene extends Phaser.Scene {
     this.clearCardList(this.communityCards);
 
     const cards = this.state.community || [];
-    const gap = 108;
+    const gap = 106;
     const startX = this.layout.center.x - ((cards.length - 1) * gap) / 2;
-    const y = this.layout.communityY;
+    const y = this.layout.lanes.communityY;
 
     const prevCommunity = this.prevState ? this.prevState.community || [] : [];
 
@@ -635,24 +707,16 @@ export class TrumpSwapScene extends Phaser.Scene {
       });
 
       if (selected) {
-        const glow = this.add.rectangle(0, 0, CARD_W + 8, CARD_H + 8, 0xf59e0b, 0.2).setStrokeStyle(3, 0xfbbf24, 1);
+        const glow = this.add.rectangle(0, 0, CARD_W + 10, CARD_H + 10, COLOR.gold, 0.22);
         sprite.root.addAt(glow, 0);
       }
+
+      if (this.state.phase === 'trick') sprite.root.setAlpha(0.62);
 
       if (!prevCommunity[idx]) {
         sprite.root.setPosition(this.layout.deckPos.x, this.layout.deckPos.y);
         sprite.root.setAlpha(0);
-        sprite.root.rotation = Phaser.Math.FloatBetween(-0.1, 0.1);
-        this.tweens.add({
-          targets: sprite.root,
-          x,
-          y,
-          alpha: 1,
-          rotation: Phaser.Math.FloatBetween(-0.02, 0.02),
-          duration: 360,
-          delay: idx * 65,
-          ease: 'Cubic.easeOut',
-        });
+        this.tweens.add({ targets: sprite.root, x, y, alpha: 1, duration: 340, delay: idx * 65, ease: 'Cubic.easeOut' });
       }
 
       this.communityCards.push(sprite);
@@ -672,16 +736,16 @@ export class TrumpSwapScene extends Phaser.Scene {
     const sorted = sortHand(raw);
     const n = sorted.length;
     const cx = this.layout.center.x;
-    const baseY = this.layout.handY;
+    const baseY = this.layout.lanes.handY;
 
     const prevMe = this.prevState ? this.prevState.players.find((p) => p.id === this.state.viewerId) : null;
     const prevRaw = prevMe ? prevMe.hand : [];
 
     sorted.forEach((card, idx) => {
       const t = n <= 1 ? 0 : idx / (n - 1);
-      const angle = Phaser.Math.Linear(-5, 5, t);
-      const offsetX = (idx - (n - 1) / 2) * 74 + this.suitGapOffset(sorted, idx);
-      const arcY = Math.pow((idx - (n - 1) / 2) / Math.max(1, n / 2), 2) * 22;
+      const angle = Phaser.Math.Linear(-7, 7, t);
+      const offsetX = (idx - (n - 1) / 2) * 68 + this.suitGapOffset(sorted, idx);
+      const arcY = Math.pow((idx - (n - 1) / 2) / Math.max(1, n / 2), 2) * 32;
       const x = cx + offsetX;
       const y = baseY + arcY;
 
@@ -717,7 +781,7 @@ export class TrumpSwapScene extends Phaser.Scene {
           alpha: 1,
           rotation: Phaser.Math.DegToRad(angle),
           duration: 340,
-          delay: idx * 52,
+          delay: idx * 54,
           ease: 'Cubic.easeOut',
         });
       }
@@ -731,7 +795,7 @@ export class TrumpSwapScene extends Phaser.Scene {
     for (let i = 1; i <= idx; i += 1) {
       const prevSuit = sorted[i - 1].slice(-1);
       const suit = sorted[i].slice(-1);
-      if (prevSuit !== suit) gap += 12;
+      if (prevSuit !== suit) gap += 16;
     }
     return gap;
   }
@@ -748,23 +812,28 @@ export class TrumpSwapScene extends Phaser.Scene {
       const idx = trick.plays.findIndex((p) => p.playerId === play.playerId);
       const angle = (Math.PI * 2 * idx) / Math.max(1, trick.plays.length);
       const target = {
-        x: this.layout.center.x + Math.cos(angle) * 58,
-        y: this.layout.trickY + Math.sin(angle) * 28,
+        x: this.layout.center.x + Math.cos(angle) * 78,
+        y: this.layout.lanes.trickY + Math.sin(angle) * 34,
       };
 
-      const card = this.createCard(from.x, from.y, play.card, { depth: DEPTH.TRICK, w: 90, h: 126 });
-      card.root.scale = 0.9;
+      const card = this.createCard(from.x, from.y, play.card, { depth: DEPTH.TRICK, w: 100, h: 140 });
+      card.root.scale = 0.94;
 
-      this.tweens.add({
-        targets: card.root,
-        x: target.x,
-        y: target.y,
-        scale: 1,
-        duration: 290,
-        ease: 'Cubic.easeOut',
-      });
-
+      this.tweens.add({ targets: card.root, x: target.x, y: target.y, scale: 1.08, duration: 320, ease: 'Cubic.easeOut' });
       this.trickCardsByPlayer.set(play.playerId, card);
+    }
+
+    if (this.state.phase === 'trick') {
+      this.trickZoneGlow.setVisible(true);
+      if (!this.trickGlowTween) {
+        this.trickGlowTween = this.tweens.add({ targets: this.trickZoneGlow, alpha: 0.22, yoyo: true, duration: 420, repeat: -1 });
+      }
+    } else {
+      this.trickZoneGlow.setVisible(false);
+      if (this.trickGlowTween) {
+        this.trickGlowTween.remove(false);
+        this.trickGlowTween = null;
+      }
     }
 
     if (prevTrick.plays.length > 0 && trick.plays.length === 0 && this.state.phase === 'trick') {
@@ -793,57 +862,91 @@ export class TrumpSwapScene extends Phaser.Scene {
   collectTrick(winnerId) {
     if (!this.trickCardsByPlayer.size) return;
 
-    const winnerSeat = this.seatPositions[this.state.players.findIndex((p) => p.id === winnerId)] || this.layout.center;
+    const seatIdx = this.state.players.findIndex((p) => p.id === winnerId);
+    const winnerSeat = this.seatPositions[seatIdx] || this.layout.center;
 
     if (winnerId && this.trickCardsByPlayer.has(winnerId)) {
       const win = this.trickCardsByPlayer.get(winnerId);
-      const glow = this.add.ellipse(0, 0, 110, 150, 0xfacc15, 0.18).setStrokeStyle(3, 0xfbbf24, 1).setDepth(DEPTH.OVERLAY);
+      const glow = this.add.ellipse(0, 0, 122, 162, COLOR.emerald, 0.2).setDepth(DEPTH.TOAST);
       win.root.addAt(glow, 0);
-      this.tweens.add({ targets: win.root, scale: 1.15, yoyo: true, duration: 170 });
-      this.showEvent(`${this.playerName(winnerId)} wins trick`);
+      this.tweens.add({ targets: win.root, scale: 1.2, yoyo: true, duration: 180 });
+      this.showToast(`${this.playerName(winnerId)} wins trick`, 1000);
     }
 
-    for (const [pid, card] of this.trickCardsByPlayer.entries()) {
+    for (const card of this.trickCardsByPlayer.values()) {
       this.tweens.add({
         targets: card.root,
         x: winnerSeat.x,
         y: winnerSeat.y,
         alpha: 0,
-        rotation: Phaser.Math.FloatBetween(-0.2, 0.2),
-        duration: 300,
-        delay: pid === winnerId ? 140 : 70,
+        duration: 320,
         ease: 'Cubic.easeIn',
         onComplete: () => card.root.destroy(),
       });
     }
 
-    this.time.delayedCall(460, () => this.trickCardsByPlayer.clear());
+    this.time.delayedCall(480, () => this.trickCardsByPlayer.clear());
   }
 
-  showEvent(message) {
-    this.hud.event.setText(message);
-    this.hud.event.setAlpha(1);
-    this.tweens.killTweensOf(this.hud.event);
-    this.tweens.add({ targets: this.hud.event, alpha: 0, duration: 1500, ease: 'Sine.easeOut' });
-  }
+  playWinnerSequence(winner) {
+    if (!winner || this.handWinnerFxRunning) return;
+    this.handWinnerFxRunning = true;
+    this.updateStartHandButtonState();
 
-  animateSwap(handCardValue, communityIndex) {
-    const handObj = this.handCards.find((c) => c.cardCode === handCardValue);
-    const commObj = this.communityCards[communityIndex];
-    if (!handObj || !commObj) return;
+    const { darken, banner, bannerText } = this.winnerFx;
+    darken.setVisible(true);
+    banner.setVisible(true);
+    darken.alpha = 0;
+    banner.alpha = 0;
+    bannerText.setText(`WINNER: ${winner.name}`);
 
-    const h = { x: handObj.root.x, y: handObj.root.y };
-    const c = { x: commObj.root.x, y: commObj.root.y };
+    this.tweens.add({ targets: darken, alpha: 0.36, duration: 220, ease: 'Sine.easeOut' });
+    this.tweens.add({ targets: banner, alpha: 1, duration: 220, ease: 'Sine.easeOut' });
 
-    const ghostH = this.createCard(h.x, h.y, 'BACK', { depth: DEPTH.OVERLAY });
-    const ghostC = this.createCard(c.x, c.y, 'BACK', { depth: DEPTH.OVERLAY });
-    ghostH.root.alpha = 0.85;
-    ghostC.root.alpha = 0.85;
+    const seatIndex = this.state.players.findIndex((p) => p.id === winner.id);
+    const winnerSeatUi = this.seatUi.get(seatIndex);
+    if (winnerSeatUi) {
+      this.winnerFx.seatGlow = this.add
+        .ellipse(winnerSeatUi.root.x, winnerSeatUi.root.y, 214, 82, COLOR.gold, 0.22)
+        .setDepth(DEPTH.WINNER);
+      this.tweens.add({ targets: this.winnerFx.seatGlow, alpha: 0.34, yoyo: true, duration: 240, repeat: 4 });
+    }
 
-    this.tweens.add({ targets: ghostH.root, x: c.x, y: c.y, duration: 260, ease: 'Cubic.easeInOut', onComplete: () => ghostH.root.destroy() });
-    this.tweens.add({ targets: ghostC.root, x: h.x, y: h.y, duration: 260, ease: 'Cubic.easeInOut', onComplete: () => ghostC.root.destroy() });
+    const start = this.hud.pot;
+    const target = winnerSeatUi ? { x: winnerSeatUi.root.x, y: winnerSeatUi.root.y } : this.layout.center;
+    for (let i = 0; i < 9; i += 1) {
+      const chip = this.add
+        .circle(start.x + Phaser.Math.Between(-20, 20), start.y + Phaser.Math.Between(-10, 10), 7, COLOR.gold, 1)
+        .setDepth(DEPTH.WINNER);
+      this.tweens.add({
+        targets: chip,
+        x: target.x + Phaser.Math.Between(-24, 24),
+        y: target.y + Phaser.Math.Between(-12, 12),
+        duration: 620,
+        delay: i * 42,
+        ease: 'Cubic.easeIn',
+        onComplete: () => chip.destroy(),
+      });
+    }
 
-    this.tweens.add({ targets: [handObj.root, commObj.root], scale: 1.14, yoyo: true, duration: 130 });
+    this.time.delayedCall(1500, () => {
+      this.tweens.add({
+        targets: [banner, darken, this.winnerFx.seatGlow].filter(Boolean),
+        alpha: 0,
+        duration: 340,
+        ease: 'Sine.easeOut',
+        onComplete: () => {
+          banner.setVisible(false);
+          darken.setVisible(false);
+          if (this.winnerFx.seatGlow) {
+            this.winnerFx.seatGlow.destroy();
+            this.winnerFx.seatGlow = null;
+          }
+          this.handWinnerFxRunning = false;
+          this.updateStartHandButtonState();
+        },
+      });
+    });
   }
 
   detectSwap(nextState) {
@@ -868,6 +971,23 @@ export class TrumpSwapScene extends Phaser.Scene {
     return null;
   }
 
+  animateSwap(handCardValue, communityIndex) {
+    const handObj = this.handCards.find((c) => c.cardCode === handCardValue);
+    const commObj = this.communityCards[communityIndex];
+    if (!handObj || !commObj) return;
+
+    const h = { x: handObj.root.x, y: handObj.root.y };
+    const c = { x: commObj.root.x, y: commObj.root.y };
+
+    const ghostH = this.createCard(h.x, h.y, 'BACK', { depth: DEPTH.TOAST });
+    const ghostC = this.createCard(c.x, c.y, 'BACK', { depth: DEPTH.TOAST });
+    ghostH.root.alpha = 0.84;
+    ghostC.root.alpha = 0.84;
+
+    this.tweens.add({ targets: ghostH.root, x: c.x, y: c.y, duration: 270, ease: 'Cubic.easeInOut', onComplete: () => ghostH.root.destroy() });
+    this.tweens.add({ targets: ghostC.root, x: h.x, y: h.y, duration: 270, ease: 'Cubic.easeInOut', onComplete: () => ghostC.root.destroy() });
+  }
+
   updateControls() {
     const me = this.getMe();
     if (!me) return;
@@ -877,12 +997,11 @@ export class TrumpSwapScene extends Phaser.Scene {
     const need = this.state.currentBet - me.roundBet;
 
     this.setButtonState(this.controls.fold, canAct);
-    this.setButtonState(this.controls.check, canAct && need <= 0);
-    this.setButtonState(this.controls.call, canAct && need > 0);
-    this.setButtonState(this.controls.bet, canAct && this.state.currentBet === 0);
-    this.setButtonState(this.controls.raise, canAct && this.state.currentBet > 0);
 
     const canSwap = canAct && !me.hasSwapped && this.state.community.length > 0;
+    this.controls.swap.g.setVisible(canSwap);
+    this.controls.swap.hit.setVisible(canSwap);
+    this.controls.swap.text.setVisible(canSwap);
     this.setButtonState(this.controls.swap, canSwap);
 
     if (!canSwap) {
@@ -891,53 +1010,78 @@ export class TrumpSwapScene extends Phaser.Scene {
       this.swapSelection.communityIndex = null;
     }
 
+    if (!canAct) this.controls.wagerMode = false;
+
     const maxBet = Math.max(1, me.stack);
     if (this.betValue > maxBet) this.betValue = maxBet;
 
-    const min = -200;
-    const max = 160;
+    const min = 580;
+    const max = 820;
     const t = maxBet <= 1 ? 0 : (this.betValue - 1) / (maxBet - 1);
     this.controls.sliderHandle.x = Phaser.Math.Linear(min, max, t);
-    this.controls.sliderFill.width = 360 * t;
+    this.controls.sliderFill.width = 240 * t;
     this.controls.sliderLabel.setText(`Bet: ${this.betValue}`);
+
+    const canWager = canAct && this.canEnterWagerMode(me, need);
+    if (this.controls.wagerMode && !canWager) this.controls.wagerMode = false;
+
+    const sliderVisible = this.controls.wagerMode && canWager;
+    this.controls.sliderTrack.setVisible(sliderVisible);
+    this.controls.sliderFill.setVisible(sliderVisible);
+    this.controls.sliderHandle.setVisible(sliderVisible);
+    this.controls.sliderLabel.setVisible(sliderVisible);
+
+    const primaryMode = sliderVisible ? (this.state.currentBet > 0 ? 'raise' : 'bet') : need > 0 ? 'call' : 'check';
+    const primarySpec = this.getPrimarySpec(primaryMode);
+    this.controls.primary.text.setText(primarySpec.label);
+    this.controls.primary.baseColor = primarySpec.color;
+    this.setButtonState(this.controls.primary, canAct);
   }
 
   setButtonState(btn, enabled) {
     btn.disabled = !enabled;
-    btn.draw(false);
+    btn.draw('idle');
   }
 
-  updateSwapBadge() {
+  canEnterWagerMode(me, need) {
+    if (!me) return false;
+    if (this.state.currentBet === 0) return me.stack > 0;
+    return me.stack > need;
+  }
+
+  getPrimarySpec(mode) {
+    switch (mode) {
+      case 'call':
+        return { label: 'Call', color: COLOR.blue };
+      case 'bet':
+        return { label: 'Bet', color: COLOR.emerald };
+      case 'raise':
+        return { label: 'Raise', color: COLOR.emerald };
+      case 'check':
+      default:
+        return { label: 'Check', color: COLOR.blue };
+    }
+  }
+
+  handlePrimaryActionClick() {
+    if (!this.state || this.controls.primary.disabled) return;
+
+    if (this.controls.primaryLongPressTriggered) {
+      this.controls.primaryLongPressTriggered = false;
+      return;
+    }
+
+    if (this.controls.wagerMode) {
+      const type = this.state.currentBet > 0 ? 'raise' : 'bet';
+      this.sendAction({ type, amount: this.getBetAmount() });
+      this.controls.wagerMode = false;
+      return;
+    }
+
     const me = this.getMe();
     if (!me) return;
-
-    const canSwap =
-      ['preflopBet', 'flopBet', 'turnBet', 'riverBet'].includes(this.state.phase) &&
-      this.state.turnPlayerId === me.id &&
-      !me.hasSwapped &&
-      this.state.community.length > 0;
-
-    if (!this.hud.swapBadge) {
-      this.hud.swapBadge = this.add
-        .text(this.layout.center.x - 108, this.layout.potY + 34, 'SWAP AVAILABLE', {
-          fontFamily: 'Rajdhani, Segoe UI, sans-serif',
-          fontSize: '20px',
-          color: '#fef3c7',
-          backgroundColor: '#92400e',
-          fontStyle: '700',
-          padding: { x: 12, y: 6 },
-        })
-        .setDepth(DEPTH.HUD)
-        .setVisible(false);
-    }
-
-    this.hud.swapBadge.setVisible(canSwap);
-    this.tweens.killTweensOf(this.hud.swapBadge);
-    if (canSwap) {
-      this.tweens.add({ targets: this.hud.swapBadge, alpha: 0.35, yoyo: true, duration: 520, repeat: -1 });
-    } else {
-      this.hud.swapBadge.alpha = 1;
-    }
+    const need = this.state.currentBet - me.roundBet;
+    this.sendAction({ type: need > 0 ? 'call' : 'check' });
   }
 
   handleSwapButton() {
@@ -947,12 +1091,12 @@ export class TrumpSwapScene extends Phaser.Scene {
       this.swapSelection.communityIndex = null;
       this.renderHand();
       this.renderCommunity();
+      this.showToast('Select hand + community card', 900);
       return;
     }
 
     if (this.swapSelection.handCard == null || this.swapSelection.communityIndex == null) {
-      this.hud.status.setColor('#fcd34d');
-      this.hud.status.setText('Swap mode: select one hand card and one community card first.');
+      this.showToast('Select one hand and one community card', 900);
       return;
     }
 
@@ -988,5 +1132,40 @@ export class TrumpSwapScene extends Phaser.Scene {
   playerName(id) {
     const p = this.state.players.find((x) => x.id === id);
     return p ? p.name : 'Player';
+  }
+
+  isHandFinished(nextState, prevState) {
+    if (!prevState || !nextState) return false;
+    return prevState.phase !== 'waiting' && nextState.phase === 'waiting';
+  }
+
+  detectHandWinner() {
+    const logs = this.state?.log || [];
+    for (let i = logs.length - 1; i >= 0; i -= 1) {
+      const foldWin = logs[i].match(/^(.+) wins \d+ chips by fold\.$/);
+      if (foldWin) return this.findPlayerByName(foldWin[1]);
+
+      const trickWin = logs[i].match(/^Hand over\. Winners?: (.+) \(\d+ tricks\)\.$/);
+      if (trickWin) {
+        const firstName = trickWin[1].split(',')[0].trim();
+        return this.findPlayerByName(firstName);
+      }
+    }
+    return null;
+  }
+
+  findPlayerByName(name) {
+    if (!name || !this.state) return null;
+    return this.state.players.find((p) => p.name === name) || null;
+  }
+
+  updateStartHandButtonState() {
+    const btn = document.getElementById('startHandBtn');
+    if (!btn) return;
+
+    const canStart = Boolean(this.state && this.state.phase === 'waiting' && !this.handWinnerFxRunning);
+    btn.disabled = !canStart;
+    btn.style.opacity = canStart ? '1' : '0.55';
+    btn.style.cursor = canStart ? 'pointer' : 'not-allowed';
   }
 }

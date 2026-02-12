@@ -1,8 +1,15 @@
 :root {
-  --bg0: #060911;
-  --bg1: #0c1321;
-  --edge: #2a3d55;
-  --text: #e7edf7;
+  --space-1: 6px;
+  --space-2: 10px;
+  --space-3: 14px;
+  --space-4: 20px;
+  --space-5: 28px;
+
+  --bg-0: #04070f;
+  --bg-1: #0b1525;
+  --bg-2: #12253b;
+  --edge: #3f5871;
+  --text: #edf3fb;
 }
 
 * {
@@ -15,67 +22,106 @@ body {
   padding: 0;
   min-height: 100%;
   color: var(--text);
-  font-family: "Rajdhani", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  font-family: 'Rajdhani', 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
   background:
-    radial-gradient(circle at 20% 10%, #1a2435 0%, transparent 40%),
-    radial-gradient(circle at 85% 15%, #153127 0%, transparent 32%),
-    linear-gradient(180deg, var(--bg1), var(--bg0));
+    radial-gradient(circle at 10% 8%, rgba(42, 66, 94, 0.45) 0%, transparent 36%),
+    radial-gradient(circle at 87% 12%, rgba(24, 89, 63, 0.32) 0%, transparent 34%),
+    linear-gradient(180deg, var(--bg-1) 0%, var(--bg-0) 100%);
 }
 
 #app {
-  width: min(1440px, 100vw);
+  width: min(1480px, 100vw);
   margin: 0 auto;
-  padding: 8px 12px 14px;
+  padding: var(--space-3) var(--space-3) var(--space-4);
 }
 
 .topbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 14px;
-  border-radius: 12px;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border-radius: 14px;
   border: 1px solid var(--edge);
-  background: linear-gradient(90deg, rgba(10, 19, 34, 0.95), rgba(13, 33, 27, 0.88));
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-  margin-bottom: 8px;
+  background: linear-gradient(90deg, rgba(7, 15, 28, 0.94), rgba(11, 30, 45, 0.9));
+  box-shadow:
+    0 14px 34px rgba(0, 0, 0, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  margin-bottom: var(--space-2);
 }
 
 .topbar h1 {
   margin: 0;
-  font-size: 1.2rem;
-  letter-spacing: 0.08em;
+  font-size: clamp(1rem, 1.2vw, 1.32rem);
+  letter-spacing: 0.11em;
   text-transform: uppercase;
   font-weight: 700;
+  color: #e5effb;
 }
 
 #startHandBtn {
-  border: 1px solid #6ee7b7;
-  color: #06130d;
-  background: linear-gradient(180deg, #34d399, #10b981);
-  border-radius: 10px;
-  padding: 8px 14px;
+  border: 1px solid #8cd8b2;
+  color: #062818;
+  background: linear-gradient(180deg, #57d4a0, #22b97f);
+  border-radius: 11px;
+  padding: 10px 16px;
+  min-width: 136px;
+  font-family: inherit;
+  font-size: 1rem;
   font-weight: 700;
   cursor: pointer;
-  transition: transform 120ms ease, filter 120ms ease;
+  transition:
+    transform 120ms ease,
+    filter 120ms ease,
+    box-shadow 120ms ease;
+  box-shadow: 0 7px 16px rgba(10, 25, 22, 0.45);
 }
 
 #startHandBtn:hover {
   transform: translateY(-1px);
-  filter: brightness(1.07);
+  filter: brightness(1.06);
+  box-shadow: 0 10px 20px rgba(12, 30, 25, 0.52);
+}
+
+#startHandBtn:active {
+  transform: translateY(0);
+  filter: brightness(0.96);
 }
 
 #game-root {
   width: 100%;
-  height: min(84vh, 930px);
-  border-radius: 14px;
+  height: min(84vh, 940px);
+  border-radius: 16px;
   overflow: hidden;
-  border: 1px solid #31445f;
+  border: 1px solid #2f4760;
   box-shadow:
-    0 16px 44px rgba(0, 0, 0, 0.5),
-    inset 0 1px 0 rgba(255, 255, 255, 0.04);
-  background: #03060c;
+    0 20px 52px rgba(0, 0, 0, 0.58),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  background:
+    radial-gradient(circle at 50% 30%, rgba(31, 89, 63, 0.08), transparent 58%),
+    #040810;
 }
 
 canvas {
   display: block;
+}
+
+@media (max-width: 900px) {
+  #app {
+    padding: var(--space-2);
+  }
+
+  .topbar {
+    padding: var(--space-2) var(--space-3);
+  }
+
+  #startHandBtn {
+    min-width: 114px;
+    padding: 8px 12px;
+    font-size: 0.92rem;
+  }
+
+  #game-root {
+    height: min(82vh, 760px);
+  }
 }
